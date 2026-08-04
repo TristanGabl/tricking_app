@@ -72,7 +72,7 @@
 <div id="wrap">
   <header>
     <h1>3D pose — __TITLE__</h1>
-    <span class="sub"><span id="camhint">camera locked at the real camera's position</span> · space to play · ←/→ step</span>
+    <span class="sub"><span id="camhint">starts at the real camera</span> · space to play/pause · ←/→ step</span>
   </header>
   <div id="stage">
     <div class="pane" id="videoPane">
@@ -122,7 +122,6 @@
         </select>
       </label>
       <button id="solid" class="on">solid</button>
-      <button id="ghost">ghosts</button>
       <button id="grid" class="on">scene</button>
       <button id="overlay" class="on">2D overlay</button>
       <button id="reset" title="back to the real camera's viewpoint">reset view</button>
@@ -186,14 +185,14 @@ let mode = canFixed ? "fixed" : "follow";
 
 /* The real camera is where this view STARTS, not where it is stuck.
 
-   Everything below happens in a WORLD frame whose Y axis is the ground normal
-   and whose origin sits on the ground directly under the athlete. Orbiting
-   spins about that world up-axis, so the ground stays level however far you
-   swing around -- rotating about the camera's own axes instead is what made
-   the ground look tilted. At yaw=pitch=0, zoom=1 the round trip is the
-   identity, so the opening view is still bit-for-bit the real camera. */
-let view = { yaw:0, pitch:0, zoom:1 };
-const VIEW_HOME = { yaw:0, pitch:0, zoom:1 };
+   It is an ordinary orbit rig in a WORLD frame whose Y axis is the ground
+   normal and whose origin sits on the ground under the athlete, so the ground
+   stays level however far you swing around. Focal length never changes --
+   zooming dollies the camera along its view ray, the way stepping closer
+   works, rather than magnifying the image. At yaw/pitch 0, dolly 1 and no pan
+   the rig reproduces the real camera exactly. */
+let rig = { yaw:0, pitch:0, dolly:1, panx:0, pany:0 };
+const RIG_HOME = { yaw:0, pitch:0, dolly:1, panx:0, pany:0 };
 
 // The fitted ground plane, in camera coordinates: n.p + d = 0, n pointing up.
 const FN = (DATA.floor && DATA.floor.n) || [0,1,0];
@@ -229,26 +228,53 @@ function toWorld(p){
   const v=[p[0]-WO[0], p[1]-WO[1], p[2]-WO[2]];
   return [dot3(v,WX), dot3(v,WY), dot3(v,WZ)];
 }
+const PIVOT_W = toWorld(PIVOT);              // = [0, hip height, 0]
+
+// The real camera's pose in world coordinates. A camera-space direction e maps
+// to the world direction [e.WX, e.WY, e.WZ].
+const CAM0   = toWorld([0,0,0]);
+const RIGHT0 = [WX[0], WY[0], WZ[0]];
+const UP0    = [WX[1], WY[1], WZ[1]];
+const FWD0   = [WX[2], WY[2], WZ[2]];
+const WUP    = [0,1,0];
+
+function rotAxis(v, axis, ang){              // Rodrigues
+  const c=Math.cos(ang), s=Math.sin(ang), k=dot3(axis,v)*(1-c), x=cross3(axis,v);
+  return [v[0]*c + x[0]*s + axis[0]*k,
+          v[1]*c + x[1]*s + axis[1]*k,
+          v[2]*c + x[2]*s + axis[2]*k];
+}
+
+/* Orbit the starting pose about the pivot, dolly along the view ray, then
+   slide the whole rig sideways/up for pan. */
+let CAM = { pos:CAM0, right:RIGHT0, up:UP0, fwd:FWD0, dist:1 };
+function updateRig(){
+  const yawed = v => rotAxis(v, WUP, rig.yaw);
+  const right = yawed(RIGHT0);
+  let up = rotAxis(yawed(UP0),  right, rig.pitch);
+  let fwd= rotAxis(yawed(FWD0), right, rig.pitch);
+  let v  = rotAxis(yawed([CAM0[0]-PIVOT_W[0], CAM0[1]-PIVOT_W[1], CAM0[2]-PIVOT_W[2]]),
+                   right, rig.pitch);
+  v = [v[0]*rig.dolly, v[1]*rig.dolly, v[2]*rig.dolly];
+  const c = [PIVOT_W[0] + right[0]*rig.panx + up[0]*rig.pany,
+             PIVOT_W[1] + right[1]*rig.panx + up[1]*rig.pany,
+             PIVOT_W[2] + right[2]*rig.panx + up[2]*rig.pany];
+  CAM = { pos:[c[0]+v[0], c[1]+v[1], c[2]+v[2]], right, up, fwd,
+          dist:Math.hypot(v[0],v[1],v[2]) };
+}
+updateRig();
+
+// World point / direction -> the rig's camera space.
+function camSpace(pw){
+  const r=[pw[0]-CAM.pos[0], pw[1]-CAM.pos[1], pw[2]-CAM.pos[2]];
+  return [dot3(r,CAM.right), dot3(r,CAM.up), dot3(r,CAM.fwd)];
+}
+function dirCam(v){ return [dot3(v,CAM.right), dot3(v,CAM.up), dot3(v,CAM.fwd)]; }
 function toCamera(pw){
   return [WO[0] + pw[0]*WX[0] + pw[1]*WY[0] + pw[2]*WZ[0],
           WO[1] + pw[0]*WX[1] + pw[1]*WY[1] + pw[2]*WZ[1],
           WO[2] + pw[0]*WX[2] + pw[1]*WY[2] + pw[2]*WZ[2]];
 }
-// Orbit: yaw about world up, then pitch about world X. Applied in world space,
-// which is why the horizon stays horizontal.
-function rotView(v){
-  const cy=Math.cos(view.yaw), sy=Math.sin(view.yaw);
-  const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
-  const x = v[0]*cy - v[2]*sy;
-  let z   = v[0]*sy + v[2]*cy;
-  const y = v[1]*cp - z*sp;
-  z       = v[1]*sp + z*cp;
-  return [x,y,z];
-}
-function viewPoint(p){ return toCamera(rotView(toWorld(p))); }
-// A point given directly in world coordinates (the grid, shadows).
-function worldPoint(pw){ return toCamera(rotView(pw)); }
-
 // Maps the real camera's image plane onto the canvas, letterboxed, so the
 // fixed view frames the scene exactly as the video does.
 let FIT = {s:1, ox:0, oy:0};
@@ -262,36 +288,18 @@ function fitCanvas(w,h){
 function pinhole(q){
   const z = q[2];
   if (z <= 0.05) return null;
-  return [INTR.cx + INTR.fx*q[0]/z, INTR.cy - INTR.fy*q[1]/z, z];
+  return [FIT.ox + (INTR.cx + INTR.fx*q[0]/z)*FIT.s,
+          FIT.oy + (INTR.cy - INTR.fy*q[1]/z)*FIT.s, z];
 }
-function toCanvas(im){
-  const pc = pinhole(PIVOT);
-  let u = im[0], v = im[1];
-  // magnify about the pivot's image position so zoom never walks off the athlete
-  if (pc){ u = pc[0] + (u-pc[0])*view.zoom; v = pc[1] + (v-pc[1])*view.zoom; }
-  return [FIT.ox + u*FIT.s, FIT.oy + v*FIT.s, im[2]];
-}
-function projectFixed(p, w, h){
-  const im = pinhole(viewPoint(p));
-  return im ? toCanvas(im) : null;
-}
-function projectWorld(pw, w, h){
-  const im = pinhole(worldPoint(pw));
-  return im ? toCanvas(im) : null;
-}
+function projectWorld(pw, w, h){ return pinhole(camSpace(pw)); }
+function projectFixed(p, w, h){ return pinhole(camSpace(toWorld(p))); }
 
 /* Pixels per metre at a given camera depth. Radii and thicknesses must go
    through this or they stop being 3D -- that is what made the joints clump
    into a blob of same-sized dots when zoomed out. */
-function dirToCam(v){
-  if (mode !== "fixed") return toCam(v);
-  const r = rotView(v);
-  return [r[0]*WX[0]+r[1]*WY[0]+r[2]*WZ[0],
-          r[0]*WX[1]+r[1]*WY[1]+r[2]*WZ[1],
-          r[0]*WX[2]+r[1]*WY[2]+r[2]*WZ[2]];
-}
+function dirToCam(v){ return (mode === "fixed") ? dirCam(v) : toCam(v); }
 function pxPerMetre(z, w, h){
-  if (mode === "fixed") return INTR.fx * FIT.s * view.zoom / Math.max(z, 1e-3);
+  if (mode === "fixed") return INTR.fx * FIT.s / Math.max(z, 1e-3);
   return (h * 0.62) / Math.max(z, 1e-3);
 }
 
@@ -383,7 +391,7 @@ for (const [a,b,,key] of EDGES.map(e=>[e[0],e[1],e[2],e[0]+"-"+e[1]])) {
 // Rotate a world point into camera space (same transform as project(), minus
 // the perspective divide) so we can do lighting and depth sorting there.
 function toCam(p){
-  if (mode === "fixed") return viewPoint(p);         // camera space after orbiting
+  if (mode === "fixed") return camSpace(toWorld(p)); // camera space, via the rig
   const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
   const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
   const x = p[0]*cy - p[2]*sy;
@@ -490,18 +498,11 @@ function groundShadow(f, w, h){
 /* The horizon is the plane's vanishing line: directions with n.dir = 0. In
    image terms that is a straight line, slanted whenever the camera is rolled. */
 function horizonAt(px){
-  // ground normal (0,1,0) in world space, carried through the orbit into camera space
-  const r = rotView([0,1,0]);
-  const n = [r[0]*WX[0]+r[1]*WY[0]+r[2]*WZ[0],
-             r[0]*WX[1]+r[1]*WY[1]+r[2]*WZ[1],
-             r[0]*WX[2]+r[1]*WY[2]+r[2]*WZ[2]];
+  const n = dirCam(WUP);                       // ground normal in camera space
   if (Math.abs(n[1]) < 1e-4) return null;
-  const pc = pinhole(PIVOT);
-  let u = (px - FIT.ox)/FIT.s;
-  if (pc) u = pc[0] + (u - pc[0])/view.zoom;   // undo the zoom to ask the pinhole
   // a vanishing line depends only on the plane's direction, not its offset
-  let v = INTR.cy + INTR.fy * ( n[0]*(u-INTR.cx)/INTR.fx + n[2] ) / n[1];
-  if (pc) v = pc[1] + (v - pc[1])*view.zoom;
+  const u = (px - FIT.ox)/FIT.s;
+  const v = INTR.cy + INTR.fy * ( n[0]*(u-INTR.cx)/INTR.fx + n[2] ) / n[1];
   return FIT.oy + v*FIT.s;
 }
 function horizonY(){ const h=horizonAt(FIT.ox + INTR.cx*FIT.s); return h===null?-1e5:h; }
@@ -614,7 +615,7 @@ function drawFrameBounds(w,h){
 function drawSkeleton(i,w,h,alpha){
   const f=PT(i); if(!f) return;
 
-  if(!solid || alpha<1){                        // flat wireframe fallback + ghosts
+  if(!solid || alpha<1){                        // flat wireframe fallback
     const P=f.map(p => (p && p[0]!==null) ? project(p,w,h) : null);
     ctx.lineCap="round";
     for(const [a,b,col] of EDGES){
@@ -731,7 +732,7 @@ function drawOverlay(i){
 }
 
 // ---- render loop --------------------------------------------------------
-let showGhosts=false, showGrid=true, solid=true, cur=0;
+let showGrid=true, solid=true, cur=0;
 
 function render3D(){
   const dpr=window.devicePixelRatio||1;
@@ -742,12 +743,9 @@ function render3D(){
   ctx.fillStyle=TH.bg; ctx.fillRect(0,0,w,h);
 
   if(mode==="fixed"){
-    fitCanvas(w,h);
+    fitCanvas(w,h); updateRig();
     if(showGrid){ drawSky(w,h); drawFloor(w,h); drawFrameBounds(w,h); }
   } else if(showGrid) drawGrid(w,h);
-  if(showGhosts) for(const d of [-8,-4,4,8]){
-    const i=cur+d; if(i>=0&&i<N&&frameOK(i)) drawSkeleton(i,w,h,0.16);
-  }
   drawTrail(w,h,cur);
   if(frameOK(cur)) drawSkeleton(cur,w,h,1);
 
@@ -809,7 +807,6 @@ playBtn.onclick=()=>setPlaying(!playing);
 scrub.oninput=()=>setFrame(+scrub.value);
 document.getElementById("speed").onchange=e=>{ if(hasVideo) vid.playbackRate=parseFloat(e.target.value); };
 document.getElementById("solid").onclick=e=>{ solid=!solid; e.target.classList.toggle("on",solid); };
-document.getElementById("ghost").onclick=e=>{ showGhosts=!showGhosts; e.target.classList.toggle("on",showGhosts); };
 document.getElementById("grid").onclick=e=>{ showGrid=!showGrid; e.target.classList.toggle("on",showGrid); };
 document.getElementById("overlay").onclick=e=>{ showOverlay=!showOverlay; e.target.classList.toggle("on",showOverlay); };
 const modeSel=document.getElementById("cammode");
@@ -825,17 +822,25 @@ function applyMode(){
     mode==="fixed" ? "3D scene — fixed camera" : "3D pose — follow camera";
   document.getElementById("reset").disabled = false;
   document.getElementById("camhint").textContent = (mode==="fixed")
-    ? "starts at the real camera · drag to orbit the scene · scroll to zoom"
+    ? "starts at the real camera · drag to orbit · shift-drag to pan · scroll to move closer"
     : "drag to orbit · scroll to zoom · shift-drag to pan";
 }
 modeSel.onchange=applyMode;
 document.getElementById("reset").onclick=()=>{
-  if(mode==="fixed") view={...VIEW_HOME};       // back to the real camera
+  if(mode==="fixed") rig={...RIG_HOME};        // back to the real camera
   else cam={...HOME};
 };
 addEventListener("keydown",e=>{
-  if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return;
-  if(e.code==="Space"){ e.preventDefault(); setPlaying(!playing); }
+  if(e.target.tagName==="SELECT") return;
+  if(e.code==="Space"){
+    // a button or the scrubber keeps focus after a click and would eat the key
+    e.preventDefault();
+    if(document.activeElement && document.activeElement !== document.body)
+      document.activeElement.blur();
+    setPlaying(!playing);
+    return;
+  }
+  if(e.target.tagName==="INPUT") return;
   if(e.code==="ArrowRight"){ setPlaying(false); setFrame(cur+1); }
   if(e.code==="ArrowLeft"){ setPlaying(false); setFrame(cur-1); }
 });
@@ -848,8 +853,13 @@ cv.addEventListener("pointermove",e=>{
   if(!drag) return;
   const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
   if(mode==="fixed"){
-    view.yaw += dx*0.008;
-    view.pitch = Math.max(-1.2, Math.min(1.2, view.pitch + dy*0.008));
+    if(drag.shift){                        // slide the rig, don't turn it
+      const k = 0.0016 * CAM.dist;         // pan a constant distance on screen
+      rig.panx -= dx*k; rig.pany += dy*k;
+    } else {
+      rig.yaw += dx*0.008;
+      rig.pitch = Math.max(-1.4, Math.min(1.4, rig.pitch + dy*0.008));
+    }
   } else if(drag.shift){
     cam.panx+=dx*0.004*cam.dist; cam.pany-=dy*0.004*cam.dist;
   } else {
@@ -860,7 +870,8 @@ cv.addEventListener("pointermove",e=>{
 cv.addEventListener("pointerup",()=>drag=null);
 cv.addEventListener("wheel",e=>{ e.preventDefault();
   if(mode==="fixed"){
-    view.zoom = Math.max(0.25, Math.min(8, view.zoom*Math.exp(-e.deltaY*0.001)));
+    // dolly along the view ray; focal length stays put
+    rig.dolly = Math.max(0.05, Math.min(6, rig.dolly*Math.exp(e.deltaY*0.001)));
   } else {
     cam.dist=Math.max(0.6,Math.min(12,cam.dist*Math.exp(e.deltaY*0.001)));
   }},{passive:false});

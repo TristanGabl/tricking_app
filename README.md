@@ -64,10 +64,12 @@ Re-render the viewer without re-running inference:
 
 **fixed — real camera** (default). The view *starts* exactly where your phone
 stood, using the recovered pose and the assumed FOV, and the athlete travels
-through the scene in front of it. From there you can drag to orbit and scroll
-to zoom — the scene rotates about a fixed pivot, the middle of the hip's x/y/z
-range over the whole clip, and zoom magnifies about that same pivot so the
-athlete never walks out of frame. "reset view" snaps back to the real camera.
+through the scene in front of it. From there it is an ordinary orbit rig: drag to orbit,
+shift-drag to pan the camera left/right and up/down, scroll to move closer or
+further. The focal length never changes — scrolling dollies the camera along
+its view ray rather than magnifying the image, so perspective behaves the way
+stepping toward something does. It orbits about the middle of the hip's x/y/z
+range over the clip. "reset view" snaps back to the real camera.
 Orbiting happens in a world frame whose up-axis *is* the ground normal and
 whose origin sits on the ground directly under the athlete, so the ground stays
 level as you swing around and the grid is centred under the skeleton. There is
@@ -99,11 +101,11 @@ keeps following the system live.
 ## Viewer controls
 
 Globally:
-space = play/pause · ←/→ = step one frame. Trail dropdown draws the flight path
+space = play/pause (works wherever focus is) · ←/→ = step one frame. Trail dropdown draws the flight path
 of a joint (off by default; hip centre is good for reading the arc of a kick or
 twist, but only the last ~45 frames are drawn — see the depth caveat below).
-"ghosts" overlays ±4/±8 frames so you can see rotation direction; "2D overlay"
-toggles the skeleton off the video so you can watch the raw footage.
+"2D overlay" toggles the skeleton off the video so you can watch the raw
+footage.
 
 Playback uses the `<video>` element as the master clock when a video is loaded,
 so the overlay can never drift out of sync with the frame it was computed from.
