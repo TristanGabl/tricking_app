@@ -93,6 +93,7 @@
           <option value="com" selected>hip centre</option>
         </select>
       </label>
+      <button id="solid" class="on">solid</button>
       <button id="ghost">ghosts</button>
       <button id="grid" class="on">floor</button>
       <button id="overlay" class="on">2D overlay</button>
@@ -114,11 +115,43 @@ for (const [g, list] of Object.entries(DATA.edges))
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
 const F = DATA.frames, N = F.length, FPS = DATA.fps;
 const SCREEN = DATA.screen || null;
+// True presentation time of each frame. Phone clips drop frames, so index/fps
+// lies; every seek and every video->frame lookup goes through this instead.
+const TIMES = DATA.times || Array.from({length:DATA.frames.length},(_,i)=>i/DATA.fps);
+function frameAtTime(t){
+  let lo=0, hi=TIMES.length-1;
+  if(t<=TIMES[0]) return 0;
+  if(t>=TIMES[hi]) return hi;
+  while(lo<hi-1){ const mid=(lo+hi)>>1; if(TIMES[mid]<=t) lo=mid; else hi=mid; }
+  return (t-TIMES[lo] <= TIMES[hi]-t) ? lo : hi;
+}
 const VIDSRC = DATA.video && DATA.video.src;
 
 // ---- camera -------------------------------------------------------------
-const HOME = { yaw:0.6, pitch:0.2, dist:2.2, panx:0, pany:0.1 };
+// Default = the source camera's own viewpoint: looking straight down world -z,
+// so the 3D pane opens as a 3D rebuild of exactly what the video shows. Orbit
+// away freely; "reset view" comes back here.
+const HOME = { yaw:0, pitch:0, dist:2.2, panx:0, pany:0.1 };
 let cam = {...HOME};
+
+// Light in world space, up/front/camera-left, plus a dim fill from the opposite
+// side so limbs facing away never go fully black.
+const LIGHT = norm3([-0.45, 0.8, -0.6]);
+const FILL  = norm3([0.5, 0.15, 0.5]);
+
+function norm3(v){ const l=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/l,v[1]/l,v[2]/l]; }
+function sub3(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+function dot3(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function cross3(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+
+function shade(rgb, amt){
+  // amt in [0,1]; below .5 darkens toward black, above brightens toward white
+  const t = Math.max(0, Math.min(1, amt));
+  return rgb.map(c => t < 0.5 ? c * (0.35 + 1.3*t)
+                              : c + (255-c) * (t-0.5) * 0.9);
+}
+function css(rgb, a){ return `rgba(${rgb.map(c=>Math.round(Math.max(0,Math.min(255,c)))).join(",")},${a})`; }
+function hex2rgb(h){ return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]; }
 
 function project(p, w, h) {
   // yaw about world Y, then pitch, then a simple perspective divide.
@@ -160,24 +193,167 @@ function drawGrid(w,h){
   }
 }
 
+// Limb thickness in metres, roughly anatomical so the figure reads as a body.
+const LIMB_R = { torso:0.075, left_arm:0.045, right_arm:0.045,
+                 left_leg:0.062, right_leg:0.062, face:0.022 };
+const BONE_R = {};   // "a-b" -> radius
+for (const [g, list] of Object.entries(DATA.edges))
+  for (const [a,b] of list) BONE_R[a+"-"+b] = LIMB_R[g];
+// hands and feet taper down from the limb they hang off
+for (const k of ["15-17","15-19","15-21","17-19","16-18","16-20","16-22","18-20"]) BONE_R[k]=0.028;
+for (const k of ["27-29","27-31","29-31","28-30","28-32","30-32"]) BONE_R[k]=0.035;
+
+const JOINT_R = {};  // sphere radius per landmark = thickest bone touching it
+for (const [a,b,,key] of EDGES.map(e=>[e[0],e[1],e[2],e[0]+"-"+e[1]])) {
+  JOINT_R[a]=Math.max(JOINT_R[a]||0, BONE_R[key]*0.92);
+  JOINT_R[b]=Math.max(JOINT_R[b]||0, BONE_R[key]*0.92);
+}
+
+// Rotate a world point into camera space (same transform as project(), minus
+// the perspective divide) so we can do lighting and depth sorting there.
+function toCam(p){
+  const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
+  const x = p[0]*cy - p[2]*sy;
+  let z = p[0]*sy + p[2]*cy;
+  const y = p[1]*cp - z*sp;
+  z = p[1]*sp + z*cp;
+  return [x, y, z];
+}
+
+/* A capsule: draw it as a screen-space quad between two circles, filled with a
+   gradient across the bone's perpendicular. The gradient stands in for the
+   cylinder's surface normal sweeping from -90deg to +90deg, which is what makes
+   the limb read as round rather than as a flat stroke. */
+function capsule(pa, pb, rw, rgb, alpha, w, h){
+  const A=project(pa,w,h), B=project(pb,w,h);
+  if(!A||!B) return;
+  const sA=(h*0.62)/A[2], sB=(h*0.62)/B[2];   // world->px at each end
+  const ra=rw*sA, rb=rw*sB;
+  let dx=B[0]-A[0], dy=B[1]-A[1];
+  const len=Math.hypot(dx,dy) || 1e-6;
+  dx/=len; dy/=len;
+  const px=-dy, py=dx;                         // screen-space perpendicular
+
+  // where the lit side falls, in perpendicular screen units
+  const axis = norm3(sub3(toCam(pb), toCam(pa)));
+  const Lc = toCam(LIGHT);
+  // component of the light perpendicular to the bone axis, projected on screen
+  const lp = norm3(sub3(Lc, axis.map(c=>c*dot3(Lc,axis))));
+  const t = Math.max(-1, Math.min(1, lp[0]*px - lp[1]*py));
+  const depthLit = Math.max(0, -lp[2]);        // light coming toward the camera
+
+  const mx=(A[0]+B[0])/2, my=(A[1]+B[1])/2, rm=(ra+rb)/2;
+  const g=ctx.createLinearGradient(mx-px*rm, my-py*rm, mx+px*rm, my+py*rm);
+  const base = 0.5 + 0.42*t + 0.18*depthLit;
+  g.addColorStop(0,    css(shade(rgb, base-0.42), alpha));
+  g.addColorStop(0.45, css(shade(rgb, base+0.06), alpha));
+  g.addColorStop(0.62, css(shade(rgb, base+0.20), alpha));   // specular band
+  g.addColorStop(1,    css(shade(rgb, base-0.34), alpha));
+  ctx.fillStyle=g;
+
+  ctx.beginPath();
+  ctx.arc(A[0],A[1],ra, Math.atan2(py,px), Math.atan2(py,px)+Math.PI, true);
+  ctx.arc(B[0],B[1],rb, Math.atan2(py,px)+Math.PI, Math.atan2(py,px), true);
+  ctx.closePath();
+  ctx.fill();
+}
+
+/* A joint sphere: radial gradient with the highlight pushed toward the light. */
+function sphere(p, rw, rgb, alpha, w, h){
+  const S=project(p,w,h); if(!S) return;
+  const r=rw*(h*0.62)/S[2];
+  if(r<0.4) return;
+  const Lc=norm3(toCam(LIGHT));
+  const hx=S[0]+Lc[0]*r*0.45, hy=S[1]-Lc[1]*r*0.45;
+  const g=ctx.createRadialGradient(hx,hy,r*0.08, S[0],S[1],r);
+  const lit=0.5+0.3*Math.max(0,-Lc[2]);
+  g.addColorStop(0,   css(shade(rgb, lit+0.30), alpha));
+  g.addColorStop(0.6, css(shade(rgb, lit-0.02), alpha));
+  g.addColorStop(1,   css(shade(rgb, lit-0.36), alpha));
+  ctx.fillStyle=g;
+  ctx.beginPath(); ctx.arc(S[0],S[1],r,0,7); ctx.fill();
+}
+
+/* Filled torso quad, shaded by its own surface normal — without this the trunk
+   is a wire box and the figure never reads as solid. */
+function torsoSlab(f, alpha, w, h){
+  const idx=[11,12,24,23];
+  if(idx.some(j=>!f[j]||f[j][0]===null)) return;
+  const P=idx.map(j=>project(f[j],w,h));
+  if(P.some(p=>!p)) return;
+  const C=idx.map(j=>toCam(f[j]));
+  let n=norm3(cross3(sub3(C[1],C[0]), sub3(C[3],C[0])));
+  if(n[2]>0) n=n.map(c=>-c);                   // always face the camera
+  const Lc=norm3(toCam(LIGHT)), Fc=norm3(toCam(FILL));
+  const lit = 0.42 + 0.46*Math.max(0,dot3(n,Lc)) + 0.16*Math.max(0,dot3(n,Fc));
+  ctx.fillStyle=css(shade(hex2rgb(GROUP_COLOR.torso), lit), alpha*0.95);
+  ctx.beginPath(); ctx.moveTo(P[0][0],P[0][1]);
+  for(let k=1;k<4;k++) ctx.lineTo(P[k][0],P[k][1]);
+  ctx.closePath(); ctx.fill();
+}
+
+/* Contact shadow: the figure flattened onto the floor plane, so you can read
+   height off the ground instead of guessing. */
+function groundShadow(f, w, h){
+  ctx.save(); ctx.globalCompositeOperation="multiply";
+  for(let j=11;j<33;j++){
+    const p=f[j]; if(!p||p[0]===null) continue;
+    const S=project([p[0],FLOOR+0.005,p[2]],w,h); if(!S) continue;
+    const drop=Math.max(0, p[1]-FLOOR);
+    const r=(JOINT_R[j]||0.04)*3.2*(h*0.62)/S[2] * (1+drop*0.8);
+    const a=0.30/(1+drop*2.2);
+    const g=ctx.createRadialGradient(S[0],S[1],0,S[0],S[1],r);
+    g.addColorStop(0,`rgba(0,0,0,${a})`); g.addColorStop(1,"rgba(0,0,0,0)");
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(S[0],S[1],r,0,7); ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawSkeleton(i,w,h,alpha){
   const f=F[i]; if(!f) return;
-  const P = f.map(p => (p && p[0]!==null) ? project(p,w,h) : null);
-  ctx.globalAlpha = alpha;
-  ctx.lineCap="round";
+
+  if(!solid || alpha<1){                        // flat wireframe fallback + ghosts
+    const P=f.map(p => (p && p[0]!==null) ? project(p,w,h) : null);
+    ctx.lineCap="round";
+    for(const [a,b,col] of EDGES){
+      if(!P[a]||!P[b]) continue;
+      const vis=Math.min(DATA.visibility[i][a],DATA.visibility[i][b]);
+      ctx.strokeStyle=col; ctx.globalAlpha=alpha*(0.25+0.75*vis);
+      ctx.lineWidth=alpha===1?4:2;
+      ctx.beginPath(); ctx.moveTo(P[a][0],P[a][1]); ctx.lineTo(P[b][0],P[b][1]); ctx.stroke();
+    }
+    ctx.globalAlpha=1;
+    return;
+  }
+
+  if(alpha===1) groundShadow(f,w,h);
+
+  // Painter's algorithm: no depth buffer on a 2D canvas, so collect every
+  // primitive with its camera depth and paint far-to-near.
+  const prims=[];
   for(const [a,b,col] of EDGES){
-    if(!P[a]||!P[b]) continue;
-    const vis = Math.min(DATA.visibility[i][a], DATA.visibility[i][b]);
-    ctx.strokeStyle = col;
-    ctx.globalAlpha = alpha * (0.25 + 0.75*vis);
-    ctx.lineWidth = alpha===1 ? 4 : 2;
-    ctx.beginPath(); ctx.moveTo(P[a][0],P[a][1]); ctx.lineTo(P[b][0],P[b][1]); ctx.stroke();
+    if(!f[a]||f[a][0]===null||!f[b]||f[b][0]===null) continue;
+    const vis=Math.min(DATA.visibility[i][a],DATA.visibility[i][b]);
+    if(vis<0.15) continue;
+    const depth=(toCam(f[a])[2]+toCam(f[b])[2])/2;
+    const rgb=hex2rgb(col), r=BONE_R[a+"-"+b]||0.04;
+    prims.push({depth, draw:()=>capsule(f[a],f[b],r,rgb,alpha*(0.4+0.6*vis),w,h)});
   }
-  if(alpha===1){
-    ctx.globalAlpha=1; ctx.fillStyle="#e6e9ef";
-    for(let j=11;j<P.length;j++){ if(!P[j]) continue;
-      ctx.beginPath(); ctx.arc(P[j][0],P[j][1],3,0,7); ctx.fill(); }
+  for(let j=0;j<33;j++){
+    if(!f[j]||f[j][0]===null||!JOINT_R[j]) continue;
+    if(DATA.visibility[i][j]<0.15) continue;
+    const grp=EDGES.find(e=>e[0]===j||e[1]===j);
+    prims.push({depth:toCam(f[j])[2],
+                draw:()=>sphere(f[j], JOINT_R[j], hex2rgb(grp?grp[2]:"#c8cdd6"),
+                                alpha*(0.4+0.6*DATA.visibility[i][j]), w, h)});
   }
+  const tC=[11,12,23,24].every(j=>f[j]&&f[j][0]!==null)
+    ? [11,12,23,24].reduce((s,j)=>s+toCam(f[j])[2],0)/4 : null;
+  if(tC!==null) prims.push({depth:tC+0.02, draw:()=>torsoSlab(f,alpha,w,h)});
+
+  prims.sort((p,q)=>q.depth-p.depth);
+  for(const p of prims) p.draw();
   ctx.globalAlpha=1;
 }
 
@@ -248,7 +424,7 @@ function drawOverlay(i){
 }
 
 // ---- render loop --------------------------------------------------------
-let showGhosts=false, showGrid=true, cur=0;
+let showGhosts=false, showGrid=true, solid=true, cur=0;
 
 function render3D(){
   const dpr=window.devicePixelRatio||1;
@@ -268,7 +444,7 @@ function render3D(){
   document.getElementById("nodet").style.display = frameOK(cur)?"none":"block";
   const hp=hipCentre(cur);
   document.getElementById("hud").innerHTML =
-    `frame <b>${cur}</b> &nbsp; t=<b>${(cur/FPS).toFixed(2)}s</b>` +
+    `frame <b>${cur}</b> &nbsp; t=<b>${TIMES[cur].toFixed(2)}s</b>` +
     (hp?`<br>hip height <b>${(hp[1]-FLOOR).toFixed(2)}</b> m`:"");
 }
 
@@ -277,20 +453,21 @@ function render3D(){
 // otherwise we advance frames off requestAnimationFrame.
 const scrub=document.getElementById("scrub"), playBtn=document.getElementById("play");
 scrub.max=N-1;
-document.getElementById("fcount").textContent=`${N} frames · ${FPS.toFixed(1)} fps`;
+document.getElementById("fcount").textContent =
+  `${N} frames · ${FPS.toFixed(1)} fps` + (DATA.model?` · ${DATA.model}`:"");
 
-let playing=false, acc=0, last=0, seeking=false;
+let playing=false, acc=0, last=0;
 
 function setFrame(i){
   cur=Math.max(0,Math.min(N-1,i));
   scrub.value=cur;
-  if(hasVideo && !playing){ seeking=true; vid.currentTime = cur/FPS; }
+  if(hasVideo && !playing) vid.currentTime = TIMES[cur];
 }
 
 function loop(t){
   if(playing){
     if(hasVideo && vid.readyState>=2){
-      cur = Math.max(0, Math.min(N-1, Math.round(vid.currentTime*FPS)));
+      cur = frameAtTime(vid.currentTime);
       scrub.value=cur;
     } else {
       if(!last) last=t;
@@ -318,6 +495,7 @@ if(hasVideo) vid.addEventListener("ended", ()=>setPlaying(false));
 playBtn.onclick=()=>setPlaying(!playing);
 scrub.oninput=()=>setFrame(+scrub.value);
 document.getElementById("speed").onchange=e=>{ if(hasVideo) vid.playbackRate=parseFloat(e.target.value); };
+document.getElementById("solid").onclick=e=>{ solid=!solid; e.target.classList.toggle("on",solid); };
 document.getElementById("ghost").onclick=e=>{ showGhosts=!showGhosts; e.target.classList.toggle("on",showGhosts); };
 document.getElementById("grid").onclick=e=>{ showGrid=!showGrid; e.target.classList.toggle("on",showGrid); };
 document.getElementById("overlay").onclick=e=>{ showOverlay=!showOverlay; e.target.classList.toggle("on",showOverlay); };

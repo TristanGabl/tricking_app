@@ -3,13 +3,15 @@
 MediaPipe PoseLandmarker (heavy) → 3D world landmarks → self-contained interactive
 web viewer.
 
-## Setup (already done)
+## Setup
 
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python mediapipe opencv-python numpy
-# model already at models/pose_landmarker_heavy.task
 ```
+
+The `.task` model files are not in the repo (30MB each) — they download
+automatically into `models/` the first time you use a variant.
 
 ## Run
 
@@ -41,6 +43,18 @@ and the video in the same relative spot. For one file you can send anywhere:
 Non-browser codecs (iPhone HEVC, ProRes) are detected via `ffprobe` and
 transcoded to H.264 into `out/` automatically.
 
+Pick the model with `-m/--model`:
+
+```bash
+.venv/bin/python extract_pose.py my_trick.mp4 -m heavy   # default, most accurate
+.venv/bin/python extract_pose.py my_trick.mp4 -m full
+.venv/bin/python extract_pose.py my_trick.mp4 -m lite    # fastest, drops more frames
+```
+
+Heavy is the default on purpose: tricking is fast and self-occluding, exactly
+where lite and full start losing the pose. The variant used is recorded in the
+JSON and shown in the viewer's footer.
+
 Re-render the viewer without re-running inference:
 
 ```bash
@@ -48,6 +62,13 @@ Re-render the viewer without re-running inference:
 ```
 
 ## Viewer controls
+
+The 3D pane **opens at the source camera's own viewpoint**, so it starts as a 3D
+rebuild of exactly what the video shows — orbit away to inspect depth, and
+"reset view" returns there. The skeleton is drawn with volume (capsule limbs,
+sphere joints, a filled torso) under a single key light plus fill, painted
+far-to-near, with a contact shadow on the floor so you can read height off the
+ground. "solid" toggles back to flat wireframe.
 
 In the 3D pane: drag = orbit · shift-drag = pan · scroll = zoom. Globally:
 space = play/pause · ←/→ = step one frame. Trail dropdown draws the flight path
@@ -76,6 +97,9 @@ goes missing. Useful as a before/after check whenever you change
 
 ## Things to know for tricking footage
 
+- **Phone clips are often variable frame rate.** The extractor records each
+  frame's true presentation timestamp and the viewer seeks by those, not by
+  `index / fps` — without that the overlay slowly slides off the athlete.
 - **World landmarks are hip-centred**, so global travel across the mat is *not*
   in the 3D plot — the athlete rotates in place. Absolute displacement would
   need the 2D `screen` coords plus a camera model.
@@ -83,5 +107,5 @@ goes missing. Useful as a before/after check whenever you change
   fine; exact limb depth during fast rotation does not.
 - Fast spins blur frames and drop detections. Shoot 60fps+ if you can; check the
   "detected pose in N/M frames" line and the red no-detection banner in the viewer.
-- `pose_landmarker_heavy.task` is the most accurate of the three; swap the
-  filename in `MODEL_PATH` for `_full` or `_lite` if you want speed.
+- Try `-m lite` for a fast first pass while framing a clip, then re-run with
+  the default heavy for the version you actually study.
