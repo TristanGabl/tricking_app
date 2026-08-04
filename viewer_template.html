@@ -121,6 +121,7 @@
           <option value="follow">follow — orbit</option>
         </select>
       </label>
+      <button id="level" title="remove the camera's roll so the floor sits flat">level</button>
       <button id="solid" class="on">solid</button>
       <button id="grid" class="on">scene</button>
       <button id="overlay" class="on">2D overlay</button>
@@ -192,6 +193,7 @@ let mode = canFixed ? "fixed" : "follow";
    works, rather than magnifying the image. At yaw/pitch 0, dolly 1 and no pan
    the rig reproduces the real camera exactly. */
 let rig = { yaw:0, pitch:0, dolly:1, panx:0, pany:0 };
+let levelHorizon = false;      // false = keep the real camera's roll
 const RIG_HOME = { yaw:0, pitch:0, dolly:1, panx:0, pany:0 };
 
 // The fitted ground plane, in camera coordinates: n.p + d = 0, n pointing up.
@@ -250,11 +252,23 @@ function rotAxis(v, axis, ang){              // Rodrigues
 let CAM = { pos:CAM0, right:RIGHT0, up:UP0, fwd:FWD0, dist:1 };
 function updateRig(){
   const yawed = v => rotAxis(v, WUP, rig.yaw);
-  const right = yawed(RIGHT0);
+  let right = yawed(RIGHT0);
   let up = rotAxis(yawed(UP0),  right, rig.pitch);
   let fwd= rotAxis(yawed(FWD0), right, rig.pitch);
   let v  = rotAxis(yawed([CAM0[0]-PIVOT_W[0], CAM0[1]-PIVOT_W[1], CAM0[2]-PIVOT_W[2]]),
                    right, rig.pitch);
+  /* Level option: rebuild the basis so the camera has no roll relative to the
+     ground. The real phone was held at a slight angle, so by default the
+     horizon inherits that tilt -- faithful, but awkward to read. Levelling
+     keeps the viewing direction and re-derives right/up from world up, which
+     makes the floor sit perfectly flat in the image. */
+  if(levelHorizon){
+    const f=norm3(fwd);
+    if(Math.abs(dot3(f,WUP)) < 0.999){
+      const r=norm3(cross3(WUP,f));
+      right = r; up = cross3(f, r); fwd = f;
+    }
+  }
   v = [v[0]*rig.dolly, v[1]*rig.dolly, v[2]*rig.dolly];
   const c = [PIVOT_W[0] + right[0]*rig.panx + up[0]*rig.pany,
              PIVOT_W[1] + right[1]*rig.panx + up[1]*rig.pany,
@@ -542,25 +556,45 @@ function drawFloor(w,h){
   ctx.beginPath(); ctx.moveTo(0,hL); ctx.lineTo(w,hR); ctx.stroke();
 
   // one-metre grid drawn in the plane's own coordinates
-  const R=14, FAR=26;
+  const R=40, FAR=70, NEAR_Z=0.06;
   ctx.lineWidth=1;
+
+  /* Grid lines must be clipped against the near plane, not discarded. At a
+     grazing angle almost every line has one end behind the camera, and
+     dropping those whole is why the floor looked empty when the view got
+     flat. */
   const seg=(pa,pb,style)=>{
-    const A=projectWorld(pa,w,h), B=projectWorld(pb,w,h);
-    if(!A||!B) return;
-    ctx.strokeStyle=style(A,B);
-    ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke();
+    let A=camSpace(pa), B=camSpace(pb);
+    if(A[2]<NEAR_Z && B[2]<NEAR_Z) return;
+    if(A[2]<NEAR_Z || B[2]<NEAR_Z){
+      const t=(NEAR_Z-A[2])/(B[2]-A[2]);
+      const M=[A[0]+(B[0]-A[0])*t, A[1]+(B[1]-A[1])*t, NEAR_Z];
+      if(A[2]<NEAR_Z) A=M; else B=M;
+    }
+    const P=pinhole(A), Q=pinhole(B);
+    if(!P||!Q) return;
+    // a line can still stretch far off-canvas; skip only if both ends are out
+    const pad=4*Math.max(w,h);
+    if((P[0]<-pad&&Q[0]<-pad)||(P[0]>w+pad&&Q[0]>w+pad)) return;
+    if((P[1]<-pad&&Q[1]<-pad)||(P[1]>h+pad&&Q[1]>h+pad)) return;
+    ctx.strokeStyle=style(P,Q);
+    ctx.beginPath(); ctx.moveTo(P[0],P[1]); ctx.lineTo(Q[0],Q[1]); ctx.stroke();
+  };
+
+  // Fade with distance but never to nothing, so the grid stays readable
+  // however flat the angle gets.
+  const L=TH.line.join(",");
+  const fade=(P,Q,al)=>{
+    const lg=ctx.createLinearGradient(P[0],P[1],Q[0],Q[1]);
+    const a0=al*Math.max(0.35, 1-Math.min(1,P[2]/FAR));
+    const a1=al*Math.max(0.35, 1-Math.min(1,Q[2]/FAR));
+    lg.addColorStop(0,`rgba(${L},${a0})`); lg.addColorStop(1,`rgba(${L},${a1})`);
+    return lg;
   };
   for(let a=-R;a<=R;a++)
-    seg([a,0,-FAR], [a,0,FAR], (A,B)=>{
-      const lg=ctx.createLinearGradient(A[0],A[1],B[0],B[1]);
-      const al = a===0 ? 0.55 : 0.26;
-      const L=TH.line.join(",");
-      lg.addColorStop(0,`rgba(${L},${al})`); lg.addColorStop(1,`rgba(${L},0)`);
-      return lg;
-    });
+    seg([a,0,-FAR], [a,0,FAR], (P,Q)=>fade(P,Q, a===0 ? 0.60 : 0.30));
   for(let b=-FAR;b<=FAR;b++)
-    seg([-R,0,b], [R,0,b],
-        ()=>`rgba(${TH.line.join(",")},${0.30*Math.max(0,1-Math.abs(b)/FAR)})`);
+    seg([-R,0,b], [R,0,b], (P,Q)=>fade(P,Q, b===0 ? 0.60 : 0.30));
 }
 
 /* Real cast shadow: slide each joint along the light direction until it hits
@@ -806,6 +840,9 @@ if(hasVideo) vid.addEventListener("ended", ()=>setPlaying(false));
 playBtn.onclick=()=>setPlaying(!playing);
 scrub.oninput=()=>setFrame(+scrub.value);
 document.getElementById("speed").onchange=e=>{ if(hasVideo) vid.playbackRate=parseFloat(e.target.value); };
+document.getElementById("level").onclick=e=>{
+  levelHorizon=!levelHorizon; e.target.classList.toggle("on",levelHorizon);
+};
 document.getElementById("solid").onclick=e=>{ solid=!solid; e.target.classList.toggle("on",solid); };
 document.getElementById("grid").onclick=e=>{ showGrid=!showGrid; e.target.classList.toggle("on",showGrid); };
 document.getElementById("overlay").onclick=e=>{ showOverlay=!showOverlay; e.target.classList.toggle("on",showOverlay); };
@@ -821,6 +858,7 @@ function applyMode(){
   document.getElementById("panetag").textContent =
     mode==="fixed" ? "3D scene — fixed camera" : "3D pose — follow camera";
   document.getElementById("reset").disabled = false;
+  document.getElementById("level").disabled = (mode!=="fixed");
   document.getElementById("camhint").textContent = (mode==="fixed")
     ? "starts at the real camera · drag to orbit · shift-drag to pan · scroll to move closer"
     : "drag to orbit · scroll to zoom · shift-drag to pan";

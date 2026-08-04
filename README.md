@@ -70,6 +70,12 @@ further. The focal length never changes — scrolling dollies the camera along
 its view ray rather than magnifying the image, so perspective behaves the way
 stepping toward something does. It orbits about the middle of the hip's x/y/z
 range over the clip. "reset view" snaps back to the real camera.
+
+**level** removes the camera's roll: the phone was held at a slight angle, so
+by default the horizon inherits that tilt — faithful to the footage, but
+awkward to read. Levelling keeps the viewing direction and re-derives the
+camera's right/up axes from world up, so the floor sits perfectly flat in the
+image. Off by default, since off is the view that matches the video exactly.
 Orbiting happens in a world frame whose up-axis *is* the ground normal and
 whose origin sits on the ground directly under the athlete, so the ground stays
 level as you swing around and the grid is centred under the skeleton. There is
