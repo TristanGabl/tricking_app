@@ -3,6 +3,8 @@
 MediaPipe PoseLandmarker (heavy) → 3D world landmarks → self-contained interactive
 web viewer.
 
+![Alt text](readme.gif)
+
 ## Setup
 
 ```bash
