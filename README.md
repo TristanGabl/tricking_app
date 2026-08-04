@@ -28,9 +28,8 @@ Produces in `out/`:
 - `my_trick.html` — standalone viewer, pose data inlined
 
 The viewer is **two panes**: your video on the left with the skeleton drawn over
-it, the 3D world landmarks on the right. Both are driven by one frame index, so
-scrubbing or playing moves them together — the fastest way to spot where
-tracking lost you.
+it, a 3D scene on the right. Both are driven by one frame index, so scrubbing or
+playing moves them together — the fastest way to spot where tracking lost you.
 
 By default the HTML points at the video by relative path, so keep the `.html`
 and the video in the same relative spot. For one file you can send anywhere:
@@ -61,16 +60,26 @@ Re-render the viewer without re-running inference:
 .venv/bin/python make_viewer.py out/my_trick.json -v my_trick.mp4
 ```
 
+## Camera modes
+
+**fixed — real camera** (default). The camera does not move: it stands exactly
+where your phone stood, using the recovered pose and the assumed FOV, and the
+athlete travels through the scene in front of it. There is a real ground plane
+fitted to the footage (tilted, since the camera rarely is level), its horizon,
+a sky, a key light with a visible sun, and a shadow cast onto the ground along
+the light direction. Orbit and zoom are disabled here by design.
+
+**follow — orbit.** The old rig: hip-centred, so the athlete rotates in place,
+and you can drag to orbit, shift-drag to pan, scroll to zoom. Use it to inspect
+a pose from angles the real camera never had. "reset view" re-centres it.
+
+The skeleton is drawn with volume (capsule limbs, sphere joints, a filled torso)
+under a key light plus fill, painted far-to-near. "solid" toggles back to flat
+wireframe; "scene" toggles the floor and sky.
+
 ## Viewer controls
 
-The 3D pane **opens at the source camera's own viewpoint**, so it starts as a 3D
-rebuild of exactly what the video shows — orbit away to inspect depth, and
-"reset view" returns there. The skeleton is drawn with volume (capsule limbs,
-sphere joints, a filled torso) under a single key light plus fill, painted
-far-to-near, with a contact shadow on the floor so you can read height off the
-ground. "solid" toggles back to flat wireframe.
-
-In the 3D pane: drag = orbit · shift-drag = pan · scroll = zoom. Globally:
+Globally:
 space = play/pause · ←/→ = step one frame. Trail dropdown draws the flight path
 of a joint (default hip centre — good for reading the arc of a kick or twist).
 "ghosts" overlays ±4/±8 frames so you can see rotation direction; "2D overlay"
@@ -100,11 +109,17 @@ goes missing. Useful as a before/after check whenever you change
 - **Phone clips are often variable frame rate.** The extractor records each
   frame's true presentation timestamp and the viewer seeks by those, not by
   `index / fps` — without that the overlay slowly slides off the athlete.
-- **World landmarks are hip-centred**, so global travel across the mat is *not*
-  in the 3D plot — the athlete rotates in place. Absolute displacement would
-  need the 2D `screen` coords plus a camera model.
-- Depth (z) is the weakest axis in a single-camera model. Twist direction reads
-  fine; exact limb depth during fast rotation does not.
+- **The metre readouts are estimates, not measurements.** Placing the athlete in
+  the camera's frame needs a focal length we don't have, so it comes from an
+  assumed `--fov` (65deg). MediaPipe's own metric scale is also unreliable — on
+  the test clip the skeleton came out ~30% short — so everything is renormalised
+  to `--height` (default 1.75 m). Get either wrong and distances scale with it.
+- **Depth is the weak axis.** On the test clip the recovered distance from the
+  camera wanders by ~0.8 m across the clip even after smoothing, which is why
+  the trail only shows the recent past and why heights are shown with a `~`.
+  Pose *shape* and twist direction are solid; absolute depth is not.
+- In follow mode the landmarks are hip-centred, so the athlete rotates in place
+  and does not travel — that view is about the pose, not the path.
 - Fast spins blur frames and drop detections. Shoot 60fps+ if you can; check the
   "detected pose in N/M frames" line and the red no-detection banner in the viewer.
 - Try `-m lite` for a fast first pass while framing a clip, then re-run with

@@ -50,7 +50,7 @@
 <div id="wrap">
   <header>
     <h1>3D pose — __TITLE__</h1>
-    <span class="sub">drag to orbit · scroll to zoom · shift-drag to pan · space to play · ←/→ step</span>
+    <span class="sub"><span id="camhint">camera locked at the real camera's position</span> · space to play · ←/→ step</span>
   </header>
   <div id="stage">
     <div class="pane" id="videoPane">
@@ -62,7 +62,7 @@
     </div>
     <div class="pane">
       <canvas id="cv"></canvas>
-      <div class="tag">3D world landmarks</div>
+      <div class="tag" id="panetag">3D scene — fixed camera</div>
       <div id="hud"></div>
       <div id="nodet">no pose detected in this frame</div>
     </div>
@@ -93,9 +93,15 @@
           <option value="com" selected>hip centre</option>
         </select>
       </label>
+      <label>camera
+        <select id="cammode">
+          <option value="fixed">fixed — real camera</option>
+          <option value="follow">follow — orbit</option>
+        </select>
+      </label>
       <button id="solid" class="on">solid</button>
       <button id="ghost">ghosts</button>
-      <button id="grid" class="on">floor</button>
+      <button id="grid" class="on">scene</button>
       <button id="overlay" class="on">2D overlay</button>
       <button id="reset">reset view</button>
     </div>
@@ -127,17 +133,54 @@ function frameAtTime(t){
 }
 const VIDSRC = DATA.video && DATA.video.src;
 
+const SCENE = DATA.scene || null;          // athlete placed in the real camera's frame
+const INTR  = DATA.intrinsics || null;
+const canFixed = !!(SCENE && INTR);
+
 // ---- camera -------------------------------------------------------------
 // Default = the source camera's own viewpoint: looking straight down world -z,
 // so the 3D pane opens as a 3D rebuild of exactly what the video shows. Orbit
 // away freely; "reset view" comes back here.
 const HOME = { yaw:0, pitch:0, dist:2.2, panx:0, pany:0.1 };
 let cam = {...HOME};
+// "fixed" stands the camera exactly where the phone was and never moves it;
+// "follow" is the orbitable rig that keeps the athlete centred.
+let mode = canFixed ? "fixed" : "follow";
+
+// Maps the real camera's image plane onto the canvas, letterboxed, so the
+// fixed view frames the scene exactly as the video does.
+let FIT = {s:1, ox:0, oy:0};
+function fitCanvas(w,h){
+  const sc = Math.min(w/INTR.width, h/INTR.height);
+  FIT = { s:sc, ox:(w-INTR.width*sc)/2, oy:(h-INTR.height*sc)/2 };
+  return FIT;
+}
+// Pinhole projection with the recovered intrinsics: camera at the origin
+// looking down +z, y up. No orbit, no pan -- this IS the real camera.
+function projectFixed(p, w, h){
+  const z = p[2];
+  if (z <= 0.05) return null;
+  const u = INTR.cx + INTR.fx * p[0] / z;
+  const v = INTR.cy - INTR.fy * p[1] / z;
+  return [FIT.ox + u*FIT.s, FIT.oy + v*FIT.s, z];
+}
+// The fitted ground plane: n.p + d = 0, n pointing up. The camera is rarely
+// level, so this is genuinely tilted and everything on the ground follows it.
+const FN = (DATA.floor && DATA.floor.n) || [0,1,0];
+const FD = (DATA.floor && DATA.floor.d) || 1.4;
+function heightAbove(p){ return FN[0]*p[0] + FN[1]*p[1] + FN[2]*p[2] + FD; }
+// An orthonormal frame lying in the plane, for drawing the grid.
+const E1 = norm3(cross3(FN, [0,0,1]));
+const E2 = cross3(FN, E1);
+const P0 = [-FD*FN[0], -FD*FN[1], -FD*FN[2]];        // closest plane point to the lens
+function onPlane(a,b){ return [P0[0]+E1[0]*a+E2[0]*b, P0[1]+E1[1]*a+E2[1]*b,
+                               P0[2]+E1[2]*a+E2[2]*b]; }
+let SFLOOR = -FD;                                     // kept for the follow-cam blob
 
 // Light in world space, up/front/camera-left, plus a dim fill from the opposite
 // side so limbs facing away never go fully black.
-const LIGHT = norm3([-0.45, 0.8, -0.6]);
-const FILL  = norm3([0.5, 0.15, 0.5]);
+const LIGHT = norm3([-0.45, 0.8, 0.42]);
+const FILL  = norm3([0.55, 0.15, -0.4]);
 
 function norm3(v){ const l=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/l,v[1]/l,v[2]/l]; }
 function sub3(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
@@ -154,6 +197,7 @@ function css(rgb, a){ return `rgba(${rgb.map(c=>Math.round(Math.max(0,Math.min(2
 function hex2rgb(h){ return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]; }
 
 function project(p, w, h) {
+  if (mode === "fixed") return projectFixed(p, w, h);
   // yaw about world Y, then pitch, then a simple perspective divide.
   const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
   const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
@@ -168,9 +212,15 @@ function project(p, w, h) {
 }
 
 // ---- data helpers -------------------------------------------------------
-function frameOK(i){ return DATA.detected[i] && F[i] && F[i][0] && F[i][0][0]!==null; }
+// One switch for the whole renderer: which point cloud, and where the ground is.
+function PT(i){ return (mode==="fixed" ? SCENE : F)[i]; }
+function floorY(){ return mode==="fixed" ? SFLOOR : FLOOR; }
+function frameOK(i){
+  const f=PT(i);
+  return DATA.detected[i] && f && f[0] && f[0][0]!==null;
+}
 function hipCentre(i){
-  const f=F[i]; if(!f||!f[23]||!f[24]||f[23][0]===null) return null;
+  const f=PT(i); if(!f||!f[23]||!f[24]||f[23][0]===null) return null;
   return [(f[23][0]+f[24][0])/2,(f[23][1]+f[24][1])/2,(f[23][2]+f[24][2])/2];
 }
 // floor height = lowest foot point across the clip, so the grid sits under the athlete
@@ -212,6 +262,7 @@ for (const [a,b,,key] of EDGES.map(e=>[e[0],e[1],e[2],e[0]+"-"+e[1]])) {
 // Rotate a world point into camera space (same transform as project(), minus
 // the perspective divide) so we can do lighting and depth sorting there.
 function toCam(p){
+  if (mode === "fixed") return [p[0], p[1], p[2]];   // already camera space
   const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
   const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
   const x = p[0]*cy - p[2]*sy;
@@ -299,8 +350,8 @@ function groundShadow(f, w, h){
   ctx.save(); ctx.globalCompositeOperation="multiply";
   for(let j=11;j<33;j++){
     const p=f[j]; if(!p||p[0]===null) continue;
-    const S=project([p[0],FLOOR+0.005,p[2]],w,h); if(!S) continue;
-    const drop=Math.max(0, p[1]-FLOOR);
+    const S=project([p[0],floorY()+0.005,p[2]],w,h); if(!S) continue;
+    const drop=Math.max(0, p[1]-floorY());
     const r=(JOINT_R[j]||0.04)*3.2*(h*0.62)/S[2] * (1+drop*0.8);
     const a=0.30/(1+drop*2.2);
     const g=ctx.createRadialGradient(S[0],S[1],0,S[0],S[1],r);
@@ -310,8 +361,112 @@ function groundShadow(f, w, h){
   ctx.restore();
 }
 
+
+/* ---- the fixed camera's world: sky, horizon, ground plane ----------------
+   The floor is the plane y = SFLOOR. Its vanishing line -- the horizon -- is
+   where points on that plane land as z goes to infinity, which for a camera
+   looking straight down +z is exactly the principal point's row. */
+/* The horizon is the plane's vanishing line: directions with n.dir = 0. In
+   image terms that is a straight line, slanted whenever the camera is rolled. */
+function horizonAt(px){
+  const u = (px - FIT.ox)/FIT.s;
+  if (Math.abs(FN[1]) < 1e-4) return null;
+  const v = INTR.cy + INTR.fy * ( FN[0]*(u-INTR.cx)/INTR.fx + FN[2] ) / FN[1];
+  return FIT.oy + v*FIT.s;
+}
+function horizonY(){ const h=horizonAt(FIT.ox + INTR.cx*FIT.s); return h===null?-1e5:h; }
+
+function drawSky(w,h){
+  const hL=horizonAt(0), hR=horizonAt(w);
+  const hz=Math.max(hL,hR);
+  const g=ctx.createLinearGradient(0,0,0,Math.max(hz,1));
+  g.addColorStop(0,"#0b1220"); g.addColorStop(0.75,"#16223a"); g.addColorStop(1,"#2b3a52");
+  ctx.fillStyle=g;
+  ctx.beginPath(); ctx.moveTo(0,-1); ctx.lineTo(w,-1);
+  ctx.lineTo(w,hR); ctx.lineTo(0,hL); ctx.closePath(); ctx.fill();
+
+  // the key light, drawn where it actually sits if it is in view
+  const far=60;
+  const S=LIGHT[2] > 0.05
+    ? projectFixed([LIGHT[0]*far, LIGHT[1]*far, LIGHT[2]*far], w, h) : null;
+  if(S && S[0]>-200 && S[0]<w+200 && S[1]<hz){
+    const gs=ctx.createRadialGradient(S[0],S[1],0,S[0],S[1],Math.max(w,h)*0.22);
+    gs.addColorStop(0,"rgba(255,240,214,0.55)");
+    gs.addColorStop(0.25,"rgba(255,226,170,0.14)");
+    gs.addColorStop(1,"rgba(255,226,170,0)");
+    ctx.fillStyle=gs; ctx.beginPath();
+    ctx.arc(S[0],S[1],Math.max(w,h)*0.22,0,7); ctx.fill();
+  }
+}
+
+function drawFloor(w,h){
+  const hL=horizonAt(0), hR=horizonAt(w), hz=Math.min(hL,hR);
+  const g=ctx.createLinearGradient(0,Math.max(hz,0),0,h);
+  g.addColorStop(0,"#2c3a52"); g.addColorStop(0.25,"#1e2839"); g.addColorStop(1,"#131a28");
+  ctx.fillStyle=g;
+  ctx.beginPath(); ctx.moveTo(0,hL); ctx.lineTo(w,hR);
+  ctx.lineTo(w,h+1); ctx.lineTo(0,h+1); ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle="rgba(150,180,220,0.40)"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,hL); ctx.lineTo(w,hR); ctx.stroke();
+
+  // one-metre grid drawn in the plane's own coordinates
+  const R=16, NEAR=0.8, FAR=30;
+  ctx.lineWidth=1;
+  const seg=(pa,pb,style)=>{
+    const A=projectFixed(pa,w,h), B=projectFixed(pb,w,h);
+    if(!A||!B) return;
+    ctx.strokeStyle=style(A,B);
+    ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke();
+  };
+  for(let a=-R;a<=R;a++)
+    seg(onPlane(a,NEAR), onPlane(a,FAR), (A,B)=>{
+      const lg=ctx.createLinearGradient(A[0],A[1],B[0],B[1]);
+      const al = a===0 ? 0.55 : 0.26;
+      lg.addColorStop(0,`rgba(140,175,215,${al})`); lg.addColorStop(1,"rgba(140,175,215,0)");
+      return lg;
+    });
+  for(let b=Math.ceil(NEAR);b<=FAR;b++)
+    seg(onPlane(-R,b), onPlane(R,b),
+        ()=>`rgba(140,175,215,${0.30*Math.max(0,1-b/FAR)})`);
+}
+
+/* Real cast shadow: slide each joint along the light direction until it hits
+   the floor plane. Reads far better than a blob directly underneath. */
+function castShadow(f,w,h){
+  const L=[-LIGHT[0],-LIGHT[1],-LIGHT[2]];   // LIGHT points at the light; rays go the other way
+  const nl = FN[0]*L[0]+FN[1]*L[1]+FN[2]*L[2];
+  if(nl > -0.05) return;                     // light not above the plane
+  ctx.save(); ctx.globalCompositeOperation="multiply";
+  const put=[];
+  for(let j=0;j<33;j++){
+    const p=f[j];
+    if(!p||p[0]===null){ put.push(null); continue; }
+    const t=-heightAbove(p)/nl;              // slide along the ray onto the plane
+    put.push([p[0]+L[0]*t, p[1]+L[1]*t, p[2]+L[2]*t]);
+  }
+  for(const [a,b] of EDGES){
+    if(!put[a]||!put[b]) continue;
+    const A=projectFixed(put[a],w,h), B=projectFixed(put[b],w,h);
+    if(!A||!B) continue;
+    const drop=Math.max(0.05, (heightAbove(f[a])+heightAbove(f[b]))/2);
+    ctx.strokeStyle=`rgba(0,0,0,${0.34/(1+drop*1.6)})`;
+    ctx.lineWidth=Math.max(2, 26/A[2]);
+    ctx.lineCap="round";
+    ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* Faint outline of what the real camera actually saw, since the canvas is a
+   different shape than the video. */
+function drawFrameBounds(w,h){
+  ctx.strokeStyle="rgba(255,255,255,0.07)"; ctx.lineWidth=1;
+  ctx.strokeRect(FIT.ox, FIT.oy, INTR.width*FIT.s, INTR.height*FIT.s);
+}
+
 function drawSkeleton(i,w,h,alpha){
-  const f=F[i]; if(!f) return;
+  const f=PT(i); if(!f) return;
 
   if(!solid || alpha<1){                        // flat wireframe fallback + ghosts
     const P=f.map(p => (p && p[0]!==null) ? project(p,w,h) : null);
@@ -327,7 +482,7 @@ function drawSkeleton(i,w,h,alpha){
     return;
   }
 
-  if(alpha===1) groundShadow(f,w,h);
+  if(alpha===1){ if(mode==="fixed") castShadow(f,w,h); else groundShadow(f,w,h); }
 
   // Painter's algorithm: no depth buffer on a 2D canvas, so collect every
   // primitive with its camera depth and paint far-to-near.
@@ -357,14 +512,18 @@ function drawSkeleton(i,w,h,alpha){
   ctx.globalAlpha=1;
 }
 
+const TRAIL_LEN = 45;
 function drawTrail(w,h,upto){
   const sel=document.getElementById("trailsel").value;
   if(sel==="") return;
   ctx.strokeStyle="#ffffff"; ctx.lineWidth=1.5; ctx.globalAlpha=0.55;
   ctx.beginPath(); let started=false;
-  for(let i=0;i<=upto;i++){
+  // only the recent past: over a whole clip, monocular depth noise turns the
+  // path into scribble long before it tells you anything
+  const from = Math.max(0, upto - TRAIL_LEN);
+  for(let i=from;i<=upto;i++){
     if(!frameOK(i)){ started=false; continue; }
-    const p = sel==="com" ? hipCentre(i) : F[i][+sel];
+    const p = sel==="com" ? hipCentre(i) : PT(i)[+sel];
     if(!p||p[0]===null){ started=false; continue; }
     const q=project(p,w,h); if(!q){ started=false; continue; }
     if(started) ctx.lineTo(q[0],q[1]); else { ctx.moveTo(q[0],q[1]); started=true; }
@@ -434,7 +593,10 @@ function render3D(){
   ctx.clearRect(0,0,w,h);
   ctx.fillStyle="#0d0f13"; ctx.fillRect(0,0,w,h);
 
-  if(showGrid) drawGrid(w,h);
+  if(mode==="fixed"){
+    fitCanvas(w,h);
+    if(showGrid){ drawSky(w,h); drawFloor(w,h); drawFrameBounds(w,h); }
+  } else if(showGrid) drawGrid(w,h);
   if(showGhosts) for(const d of [-8,-4,4,8]){
     const i=cur+d; if(i>=0&&i<N&&frameOK(i)) drawSkeleton(i,w,h,0.16);
   }
@@ -445,7 +607,10 @@ function render3D(){
   const hp=hipCentre(cur);
   document.getElementById("hud").innerHTML =
     `frame <b>${cur}</b> &nbsp; t=<b>${TIMES[cur].toFixed(2)}s</b>` +
-    (hp?`<br>hip height <b>${(hp[1]-FLOOR).toFixed(2)}</b> m`:"");
+    (hp ? (mode==="fixed"
+            ? `<br>hip ~<b>${heightAbove(hp).toFixed(2)}</b> m up · ~<b>${hp[2].toFixed(1)}</b> m out`
+            : `<br>hip height <b>${(hp[1]-floorY()).toFixed(2)}</b> m`)
+        : "");
 }
 
 // ---- playback -----------------------------------------------------------
@@ -499,6 +664,23 @@ document.getElementById("solid").onclick=e=>{ solid=!solid; e.target.classList.t
 document.getElementById("ghost").onclick=e=>{ showGhosts=!showGhosts; e.target.classList.toggle("on",showGhosts); };
 document.getElementById("grid").onclick=e=>{ showGrid=!showGrid; e.target.classList.toggle("on",showGrid); };
 document.getElementById("overlay").onclick=e=>{ showOverlay=!showOverlay; e.target.classList.toggle("on",showOverlay); };
+const modeSel=document.getElementById("cammode");
+modeSel.value = mode;
+if(!canFixed){
+  modeSel.querySelector('option[value=fixed]').disabled = true;
+  modeSel.title = "no scene placement in this file — re-run extract_pose.py";
+}
+function applyMode(){
+  mode = modeSel.value;
+  document.getElementById("panetag").textContent =
+    mode==="fixed" ? "3D scene — fixed camera" : "3D pose — follow camera";
+  document.getElementById("reset").disabled = (mode==="fixed");
+  cv.style.cursor = (mode==="fixed") ? "default" : "grab";
+  document.getElementById("camhint").textContent = (mode==="fixed")
+    ? "camera locked at the real camera's position"
+    : "drag to orbit · scroll to zoom · shift-drag to pan";
+}
+modeSel.onchange=applyMode;
 document.getElementById("reset").onclick=()=>{ cam={...HOME}; };
 addEventListener("keydown",e=>{
   if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return;
@@ -509,7 +691,9 @@ addEventListener("keydown",e=>{
 
 // ---- mouse --------------------------------------------------------------
 let drag=null;
-cv.addEventListener("pointerdown",e=>{ drag={x:e.clientX,y:e.clientY,shift:e.shiftKey}; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointerdown",e=>{
+  if(mode==="fixed") return;
+  drag={x:e.clientX,y:e.clientY,shift:e.shiftKey}; cv.setPointerCapture(e.pointerId); });
 cv.addEventListener("pointermove",e=>{
   if(!drag) return;
   const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
@@ -518,9 +702,10 @@ cv.addEventListener("pointermove",e=>{
   drag.x=e.clientX; drag.y=e.clientY;
 });
 cv.addEventListener("pointerup",()=>drag=null);
-cv.addEventListener("wheel",e=>{ e.preventDefault();
+cv.addEventListener("wheel",e=>{ if(mode==="fixed") return; e.preventDefault();
   cam.dist=Math.max(0.6,Math.min(12,cam.dist*Math.exp(e.deltaY*0.001))); },{passive:false});
 
+applyMode();
 requestAnimationFrame(loop);
 </script>
 </body>
