@@ -184,14 +184,24 @@ let cam = {...HOME};
 // "follow" is the orbitable rig that keeps the athlete centred.
 let mode = canFixed ? "fixed" : "follow";
 
-/* The real camera is where this view STARTS, not where it is stuck. The scene
-   rotates about a fixed pivot -- the middle of the hip's x/y/z range over the
-   whole clip -- and zoom magnifies about that same pivot, so at yaw=pitch=0,
-   zoom=1 the projection is bit-for-bit the real camera's framing. */
-let PIVOT = [0,0,3];
+/* The real camera is where this view STARTS, not where it is stuck.
+
+   Everything below happens in a WORLD frame whose Y axis is the ground normal
+   and whose origin sits on the ground directly under the athlete. Orbiting
+   spins about that world up-axis, so the ground stays level however far you
+   swing around -- rotating about the camera's own axes instead is what made
+   the ground look tilted. At yaw=pitch=0, zoom=1 the round trip is the
+   identity, so the opening view is still bit-for-bit the real camera. */
 let view = { yaw:0, pitch:0, zoom:1 };
 const VIEW_HOME = { yaw:0, pitch:0, zoom:1 };
 
+// The fitted ground plane, in camera coordinates: n.p + d = 0, n pointing up.
+const FN = (DATA.floor && DATA.floor.n) || [0,1,0];
+const FD = (DATA.floor && DATA.floor.d) || 1.4;
+function heightAbove(p){ return FN[0]*p[0] + FN[1]*p[1] + FN[2]*p[2] + FD; }
+
+// Middle of the hip's x/y/z range over the clip: what we orbit around.
+let PIVOT = [0,0,3];
 if (canFixed){
   let lo=[ Infinity, Infinity, Infinity], hi=[-Infinity,-Infinity,-Infinity];
   for (const f of SCENE){
@@ -204,7 +214,28 @@ if (canFixed){
   if (isFinite(lo[0])) PIVOT = [0,1,2].map(k=>(lo[k]+hi[k])/2);
 }
 
-// Rotate a vector by the current view (yaw about Y, then pitch).
+// World axes expressed in camera coordinates. Y is the ground normal; X is the
+// camera's right, flattened into the ground; Z completes a right-handed frame.
+const WY = norm3(FN);
+const WX = (()=>{ const r=[1,0,0], k=dot3(r,WY);
+                  return norm3([r[0]-k*WY[0], r[1]-k*WY[1], r[2]-k*WY[2]]); })();
+const WZ = cross3(WX, WY);
+// Origin: the athlete's pivot dropped straight onto the ground. This is what
+// puts the grid under the skeleton instead of under the lens.
+const WO = (()=>{ const hgt = heightAbove(PIVOT);
+                  return [PIVOT[0]-hgt*WY[0], PIVOT[1]-hgt*WY[1], PIVOT[2]-hgt*WY[2]]; })();
+
+function toWorld(p){
+  const v=[p[0]-WO[0], p[1]-WO[1], p[2]-WO[2]];
+  return [dot3(v,WX), dot3(v,WY), dot3(v,WZ)];
+}
+function toCamera(pw){
+  return [WO[0] + pw[0]*WX[0] + pw[1]*WY[0] + pw[2]*WZ[0],
+          WO[1] + pw[0]*WX[1] + pw[1]*WY[1] + pw[2]*WZ[1],
+          WO[2] + pw[0]*WX[2] + pw[1]*WY[2] + pw[2]*WZ[2]];
+}
+// Orbit: yaw about world up, then pitch about world X. Applied in world space,
+// which is why the horizon stays horizontal.
 function rotView(v){
   const cy=Math.cos(view.yaw), sy=Math.sin(view.yaw);
   const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
@@ -214,11 +245,9 @@ function rotView(v){
   z       = v[1]*sp + z*cp;
   return [x,y,z];
 }
-// World point -> camera space, after orbiting about the pivot.
-function viewPoint(p){
-  const r = rotView([p[0]-PIVOT[0], p[1]-PIVOT[1], p[2]-PIVOT[2]]);
-  return [r[0]+PIVOT[0], r[1]+PIVOT[1], r[2]+PIVOT[2]];
-}
+function viewPoint(p){ return toCamera(rotView(toWorld(p))); }
+// A point given directly in world coordinates (the grid, shadows).
+function worldPoint(pw){ return toCamera(rotView(pw)); }
 
 // Maps the real camera's image plane onto the canvas, letterboxed, so the
 // fixed view frames the scene exactly as the video does.
@@ -230,32 +259,42 @@ function fitCanvas(w,h){
 }
 // Pinhole projection with the recovered intrinsics: camera at the origin
 // looking down +z, y up.
-function pinhole(q, w, h){
+function pinhole(q){
   const z = q[2];
   if (z <= 0.05) return null;
   return [INTR.cx + INTR.fx*q[0]/z, INTR.cy - INTR.fy*q[1]/z, z];
 }
-function projectFixed(p, w, h){
-  const q = viewPoint(p);
-  const im = pinhole(q, w, h);
-  if (!im) return null;
-  // magnify about the pivot's image position so zoom never walks off the athlete
-  const pc = pinhole(PIVOT, w, h);
+function toCanvas(im){
+  const pc = pinhole(PIVOT);
   let u = im[0], v = im[1];
+  // magnify about the pivot's image position so zoom never walks off the athlete
   if (pc){ u = pc[0] + (u-pc[0])*view.zoom; v = pc[1] + (v-pc[1])*view.zoom; }
   return [FIT.ox + u*FIT.s, FIT.oy + v*FIT.s, im[2]];
 }
-// The fitted ground plane: n.p + d = 0, n pointing up. The camera is rarely
-// level, so this is genuinely tilted and everything on the ground follows it.
-const FN = (DATA.floor && DATA.floor.n) || [0,1,0];
-const FD = (DATA.floor && DATA.floor.d) || 1.4;
-function heightAbove(p){ return FN[0]*p[0] + FN[1]*p[1] + FN[2]*p[2] + FD; }
-// An orthonormal frame lying in the plane, for drawing the grid.
-const E1 = norm3(cross3(FN, [0,0,1]));
-const E2 = cross3(FN, E1);
-const P0 = [-FD*FN[0], -FD*FN[1], -FD*FN[2]];        // closest plane point to the lens
-function onPlane(a,b){ return [P0[0]+E1[0]*a+E2[0]*b, P0[1]+E1[1]*a+E2[1]*b,
-                               P0[2]+E1[2]*a+E2[2]*b]; }
+function projectFixed(p, w, h){
+  const im = pinhole(viewPoint(p));
+  return im ? toCanvas(im) : null;
+}
+function projectWorld(pw, w, h){
+  const im = pinhole(worldPoint(pw));
+  return im ? toCanvas(im) : null;
+}
+
+/* Pixels per metre at a given camera depth. Radii and thicknesses must go
+   through this or they stop being 3D -- that is what made the joints clump
+   into a blob of same-sized dots when zoomed out. */
+function dirToCam(v){
+  if (mode !== "fixed") return toCam(v);
+  const r = rotView(v);
+  return [r[0]*WX[0]+r[1]*WY[0]+r[2]*WZ[0],
+          r[0]*WX[1]+r[1]*WY[1]+r[2]*WZ[1],
+          r[0]*WX[2]+r[1]*WY[2]+r[2]*WZ[2]];
+}
+function pxPerMetre(z, w, h){
+  if (mode === "fixed") return INTR.fx * FIT.s * view.zoom / Math.max(z, 1e-3);
+  return (h * 0.62) / Math.max(z, 1e-3);
+}
+
 let SFLOOR = -FD;                                     // kept for the follow-cam blob
 
 // Light in world space, up/front/camera-left, plus a dim fill from the opposite
@@ -361,7 +400,7 @@ function toCam(p){
 function capsule(pa, pb, rw, rgb, alpha, w, h){
   const A=project(pa,w,h), B=project(pb,w,h);
   if(!A||!B) return;
-  const sA=(h*0.62)/A[2], sB=(h*0.62)/B[2];   // world->px at each end
+  const sA=pxPerMetre(A[2],w,h), sB=pxPerMetre(B[2],w,h);   // world->px at each end
   const ra=rw*sA, rb=rw*sB;
   let dx=B[0]-A[0], dy=B[1]-A[1];
   const len=Math.hypot(dx,dy) || 1e-6;
@@ -370,7 +409,7 @@ function capsule(pa, pb, rw, rgb, alpha, w, h){
 
   // where the lit side falls, in perpendicular screen units
   const axis = norm3(sub3(toCam(pb), toCam(pa)));
-  const Lc = toCam(LIGHT);
+  const Lc = dirToCam(LIGHT);
   // component of the light perpendicular to the bone axis, projected on screen
   const lp = norm3(sub3(Lc, axis.map(c=>c*dot3(Lc,axis))));
   const t = Math.max(-1, Math.min(1, lp[0]*px - lp[1]*py));
@@ -395,9 +434,9 @@ function capsule(pa, pb, rw, rgb, alpha, w, h){
 /* A joint sphere: radial gradient with the highlight pushed toward the light. */
 function sphere(p, rw, rgb, alpha, w, h){
   const S=project(p,w,h); if(!S) return;
-  const r=rw*(h*0.62)/S[2];
+  const r=rw*pxPerMetre(S[2],w,h);
   if(r<0.4) return;
-  const Lc=norm3(toCam(LIGHT));
+  const Lc=norm3(dirToCam(LIGHT));
   const hx=S[0]+Lc[0]*r*0.45, hy=S[1]-Lc[1]*r*0.45;
   const g=ctx.createRadialGradient(hx,hy,r*0.08, S[0],S[1],r);
   const lit=0.5+0.3*Math.max(0,-Lc[2]);
@@ -418,7 +457,7 @@ function torsoSlab(f, alpha, w, h){
   const C=idx.map(j=>toCam(f[j]));
   let n=norm3(cross3(sub3(C[1],C[0]), sub3(C[3],C[0])));
   if(n[2]>0) n=n.map(c=>-c);                   // always face the camera
-  const Lc=norm3(toCam(LIGHT)), Fc=norm3(toCam(FILL));
+  const Lc=norm3(dirToCam(LIGHT)), Fc=norm3(dirToCam(FILL));
   const lit = 0.42 + 0.46*Math.max(0,dot3(n,Lc)) + 0.16*Math.max(0,dot3(n,Fc));
   ctx.fillStyle=css(shade(hex2rgb(GROUP_COLOR.torso), lit), alpha*0.95);
   ctx.beginPath(); ctx.moveTo(P[0][0],P[0][1]);
@@ -434,7 +473,7 @@ function groundShadow(f, w, h){
     const p=f[j]; if(!p||p[0]===null) continue;
     const S=project([p[0],floorY()+0.005,p[2]],w,h); if(!S) continue;
     const drop=Math.max(0, p[1]-floorY());
-    const r=(JOINT_R[j]||0.04)*3.2*(h*0.62)/S[2] * (1+drop*0.8);
+    const r=(JOINT_R[j]||0.04)*3.2*pxPerMetre(S[2],w,h) * (1+drop*0.8);
     const a=0.30/(1+drop*2.2);
     const g=ctx.createRadialGradient(S[0],S[1],0,S[0],S[1],r);
     g.addColorStop(0,`rgba(0,0,0,${a})`); g.addColorStop(1,"rgba(0,0,0,0)");
@@ -451,14 +490,16 @@ function groundShadow(f, w, h){
 /* The horizon is the plane's vanishing line: directions with n.dir = 0. In
    image terms that is a straight line, slanted whenever the camera is rolled. */
 function horizonAt(px){
-  const n = rotView(FN);                       // plane normal follows the orbit
-  const dot = FN[0]*PIVOT[0]+FN[1]*PIVOT[1]+FN[2]*PIVOT[2];
-  const dn  = n[0]*PIVOT[0]+n[1]*PIVOT[1]+n[2]*PIVOT[2];
-  const d   = FD + dot - dn;
+  // ground normal (0,1,0) in world space, carried through the orbit into camera space
+  const r = rotView([0,1,0]);
+  const n = [r[0]*WX[0]+r[1]*WY[0]+r[2]*WZ[0],
+             r[0]*WX[1]+r[1]*WY[1]+r[2]*WZ[1],
+             r[0]*WX[2]+r[1]*WY[2]+r[2]*WZ[2]];
   if (Math.abs(n[1]) < 1e-4) return null;
-  const pc = pinhole(PIVOT, 0, 0);
+  const pc = pinhole(PIVOT);
   let u = (px - FIT.ox)/FIT.s;
   if (pc) u = pc[0] + (u - pc[0])/view.zoom;   // undo the zoom to ask the pinhole
+  // a vanishing line depends only on the plane's direction, not its offset
   let v = INTR.cy + INTR.fy * ( n[0]*(u-INTR.cx)/INTR.fx + n[2] ) / n[1];
   if (pc) v = pc[1] + (v - pc[1])*view.zoom;
   return FIT.oy + v*FIT.s;
@@ -476,8 +517,7 @@ function drawSky(w,h){
 
   // the key light, drawn where it actually sits if it is in view
   const far=60;
-  const S=LIGHT[2] > 0.05
-    ? projectFixed([LIGHT[0]*far, LIGHT[1]*far, LIGHT[2]*far], w, h) : null;
+  const S=projectWorld([LIGHT[0]*far, LIGHT[1]*far, LIGHT[2]*far], w, h);
   if(S && S[0]>-200 && S[0]<w+200 && S[1]<hz){
     const gs=ctx.createRadialGradient(S[0],S[1],0,S[0],S[1],Math.max(w,h)*0.22);
     const S3=TH.sun.join(",");
@@ -501,25 +541,25 @@ function drawFloor(w,h){
   ctx.beginPath(); ctx.moveTo(0,hL); ctx.lineTo(w,hR); ctx.stroke();
 
   // one-metre grid drawn in the plane's own coordinates
-  const R=16, NEAR=0.8, FAR=30;
+  const R=14, FAR=26;
   ctx.lineWidth=1;
   const seg=(pa,pb,style)=>{
-    const A=projectFixed(pa,w,h), B=projectFixed(pb,w,h);
+    const A=projectWorld(pa,w,h), B=projectWorld(pb,w,h);
     if(!A||!B) return;
     ctx.strokeStyle=style(A,B);
     ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke();
   };
   for(let a=-R;a<=R;a++)
-    seg(onPlane(a,NEAR), onPlane(a,FAR), (A,B)=>{
+    seg([a,0,-FAR], [a,0,FAR], (A,B)=>{
       const lg=ctx.createLinearGradient(A[0],A[1],B[0],B[1]);
       const al = a===0 ? 0.55 : 0.26;
       const L=TH.line.join(",");
       lg.addColorStop(0,`rgba(${L},${al})`); lg.addColorStop(1,`rgba(${L},0)`);
       return lg;
     });
-  for(let b=Math.ceil(NEAR);b<=FAR;b++)
-    seg(onPlane(-R,b), onPlane(R,b),
-        ()=>`rgba(${TH.line.join(",")},${0.30*Math.max(0,1-b/FAR)})`);
+  for(let b=-FAR;b<=FAR;b++)
+    seg([-R,0,b], [R,0,b],
+        ()=>`rgba(${TH.line.join(",")},${0.30*Math.max(0,1-Math.abs(b)/FAR)})`);
 }
 
 /* Real cast shadow: slide each joint along the light direction until it hits
@@ -531,8 +571,7 @@ const sctx = shadowBuf.getContext("2d");
 
 function castShadow(f,w,h){
   const L=[-LIGHT[0],-LIGHT[1],-LIGHT[2]];   // LIGHT points at the light; rays go the other way
-  const nl = FN[0]*L[0]+FN[1]*L[1]+FN[2]*L[2];
-  if(nl > -0.05) return;                     // light not above the plane
+  if(L[1] > -0.05) return;                   // light not above the ground
   const dpr=window.devicePixelRatio||1;
   if(shadowBuf.width!==w*dpr||shadowBuf.height!==h*dpr){
     shadowBuf.width=w*dpr; shadowBuf.height=h*dpr;
@@ -543,15 +582,16 @@ function castShadow(f,w,h){
   for(let j=0;j<33;j++){
     const p=f[j];
     if(!p||p[0]===null){ put.push(null); continue; }
-    const t=-heightAbove(p)/nl;              // slide along the ray onto the plane
-    put.push([p[0]+L[0]*t, p[1]+L[1]*t, p[2]+L[2]*t]);
+    const pw=toWorld(p);
+    const t=-pw[1]/L[1];                     // slide along the ray onto y=0
+    put.push([pw[0]+L[0]*t, 0, pw[2]+L[2]*t]);
   }
   sctx.strokeStyle="#000"; sctx.lineCap="round";
   for(const [a,b] of EDGES){
     if(!put[a]||!put[b]) continue;
-    const A=projectFixed(put[a],w,h), B=projectFixed(put[b],w,h);
+    const A=projectWorld(put[a],w,h), B=projectWorld(put[b],w,h);
     if(!A||!B) continue;
-    sctx.lineWidth=Math.max(2, 26/A[2]);
+    sctx.lineWidth=Math.max(1, 0.055*pxPerMetre(A[2],w,h));
     sctx.beginPath(); sctx.moveTo(A[0],A[1]); sctx.lineTo(B[0],B[1]); sctx.stroke();
   }
   // one composite, one tint -- height off the ground only softens the whole thing

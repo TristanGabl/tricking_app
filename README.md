@@ -68,8 +68,11 @@ through the scene in front of it. From there you can drag to orbit and scroll
 to zoom — the scene rotates about a fixed pivot, the middle of the hip's x/y/z
 range over the whole clip, and zoom magnifies about that same pivot so the
 athlete never walks out of frame. "reset view" snaps back to the real camera.
-There is a ground plane, its horizon, a sky, a key light with a visible sun,
-and a shadow cast onto the ground along the light direction.
+Orbiting happens in a world frame whose up-axis *is* the ground normal and
+whose origin sits on the ground directly under the athlete, so the ground stays
+level as you swing around and the grid is centred under the skeleton. There is
+a ground plane, its horizon, a sky, a key light with a visible sun, and a
+shadow cast onto the ground along the light direction.
 
 Nothing assumes where the camera was — hip height, head height, propped on a
 bag or sitting in the grass all work. The ground plane is fitted only to the
