@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D pose — __TITLE__</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0d0f13; color:#e6e9ef;
+         font:14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif; }
+  #wrap { display:flex; flex-direction:column; height:100vh; }
+  header { padding:10px 16px; border-bottom:1px solid #23262d; display:flex;
+           gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .sub { color:#7d838f; font-size:12px; }
+  #stage { flex:1; display:flex; min-height:0; }
+  .pane { position:relative; min-width:0; min-height:0; flex:1; }
+  #videoPane { display:none; border-right:1px solid #23262d; background:#000;
+               align-items:center; justify-content:center; }
+  #videoPane.on { display:flex; }
+  #vidbox { position:relative; max-width:100%; max-height:100%; }
+  video { display:block; max-width:100%; max-height:100%; }
+  #ovl { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  canvas#cv { width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
+  canvas#cv:active { cursor:grabbing; }
+  .tag { position:absolute; top:10px; left:12px; font-size:11px; letter-spacing:.06em;
+         text-transform:uppercase; color:#5d636e; pointer-events:none; }
+  #hud { position:absolute; top:28px; left:12px; font-size:12px; color:#7d838f;
+         pointer-events:none; line-height:1.7; }
+  #hud b { color:#e6e9ef; font-variant-numeric:tabular-nums; font-weight:600; }
+  #nodet { position:absolute; top:10px; right:14px; font-size:12px; color:#ff8a6b;
+           display:none; }
+  footer { border-top:1px solid #23262d; padding:10px 16px 14px;
+           display:flex; flex-direction:column; gap:10px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  button { background:#1a1d24; color:#e6e9ef; border:1px solid #2e323b;
+           border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  button:hover { background:#232730; }
+  button.on { background:#2b6cb0; border-color:#3b82c4; }
+  input[type=range] { flex:1; min-width:180px; accent-color:#4a9eff; }
+  label { color:#9aa1ad; font-size:12px; display:flex; gap:6px; align-items:center; }
+  select { background:#1a1d24; color:#e6e9ef; border:1px solid #2e323b;
+           border-radius:6px; padding:5px 8px; font:inherit; }
+  @media (max-width: 820px) { #stage { flex-direction:column; }
+    #videoPane { border-right:none; border-bottom:1px solid #23262d; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>3D pose — __TITLE__</h1>
+    <span class="sub">drag to orbit · scroll to zoom · shift-drag to pan · space to play · ←/→ step</span>
+  </header>
+  <div id="stage">
+    <div class="pane" id="videoPane">
+      <div id="vidbox">
+        <video id="vid" playsinline muted preload="auto"></video>
+        <canvas id="ovl"></canvas>
+      </div>
+      <div class="tag">source + 2D overlay</div>
+    </div>
+    <div class="pane">
+      <canvas id="cv"></canvas>
+      <div class="tag">3D world landmarks</div>
+      <div id="hud"></div>
+      <div id="nodet">no pose detected in this frame</div>
+    </div>
+  </div>
+  <footer>
+    <div class="row">
+      <button id="play">▶ play</button>
+      <input type="range" id="scrub" min="0" value="0" step="1">
+      <span id="fcount" style="color:#7d838f;font-variant-numeric:tabular-nums"></span>
+    </div>
+    <div class="row">
+      <label>speed
+        <select id="speed">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+        </select>
+      </label>
+      <label>trail
+        <select id="trailsel">
+          <option value="">off</option>
+          <option value="0">nose</option>
+          <option value="15">left wrist</option>
+          <option value="16">right wrist</option>
+          <option value="27">left ankle</option>
+          <option value="28">right ankle</option>
+          <option value="com" selected>hip centre</option>
+        </select>
+      </label>
+      <button id="ghost">ghosts</button>
+      <button id="grid" class="on">floor</button>
+      <button id="overlay" class="on">2D overlay</button>
+      <button id="reset">reset view</button>
+    </div>
+  </footer>
+</div>
+<script>
+const DATA = /*__DATA__*/null;
+
+const GROUP_COLOR = {
+  torso:"#c8cdd6", left_arm:"#4a9eff", right_arm:"#ff7a59",
+  left_leg:"#41c7a8", right_leg:"#f2c14e", face:"#6b7280",
+};
+const EDGES = [];
+for (const [g, list] of Object.entries(DATA.edges))
+  for (const [a,b] of list) EDGES.push([a,b,GROUP_COLOR[g]]);
+
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+const F = DATA.frames, N = F.length, FPS = DATA.fps;
+const SCREEN = DATA.screen || null;
+const VIDSRC = DATA.video && DATA.video.src;
+
+// ---- camera -------------------------------------------------------------
+const HOME = { yaw:0.6, pitch:0.2, dist:2.2, panx:0, pany:0.1 };
+let cam = {...HOME};
+
+function project(p, w, h) {
+  // yaw about world Y, then pitch, then a simple perspective divide.
+  const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
+  let x = p[0]*cy - p[2]*sy;
+  let z = p[0]*sy + p[2]*cy;
+  let y = p[1]*cp - z*sp;
+  z     = p[1]*sp + z*cp;
+  const zc = z + cam.dist;
+  if (zc <= 0.05) return null;
+  const s = (h * 0.62) / zc;
+  return [w/2 + (x + cam.panx)*s, h/2 - (y + cam.pany)*s, zc];
+}
+
+// ---- data helpers -------------------------------------------------------
+function frameOK(i){ return DATA.detected[i] && F[i] && F[i][0] && F[i][0][0]!==null; }
+function hipCentre(i){
+  const f=F[i]; if(!f||!f[23]||!f[24]||f[23][0]===null) return null;
+  return [(f[23][0]+f[24][0])/2,(f[23][1]+f[24][1])/2,(f[23][2]+f[24][2])/2];
+}
+// floor height = lowest foot point across the clip, so the grid sits under the athlete
+let FLOOR = 0;
+{ let lo=Infinity;
+  for(let i=0;i<N;i++) if(frameOK(i)) for(const j of [29,30,31,32]) lo=Math.min(lo,F[i][j][1]);
+  FLOOR = isFinite(lo) ? lo : -1; }
+
+// ---- 3D drawing ---------------------------------------------------------
+function drawGrid(w,h){
+  const R=1.2, step=0.3;
+  ctx.lineWidth=1;
+  for(let k=-R;k<=R+1e-6;k+=step){
+    for(const seg of [[[-R,FLOOR,k],[R,FLOOR,k]],[[k,FLOOR,-R],[k,FLOOR,R]]]){
+      const a=project(seg[0],w,h), b=project(seg[1],w,h);
+      if(!a||!b) continue;
+      ctx.strokeStyle = Math.abs(k)<1e-6 ? "#2f3540" : "#1c2029";
+      ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke();
+    }
+  }
+}
+
+function drawSkeleton(i,w,h,alpha){
+  const f=F[i]; if(!f) return;
+  const P = f.map(p => (p && p[0]!==null) ? project(p,w,h) : null);
+  ctx.globalAlpha = alpha;
+  ctx.lineCap="round";
+  for(const [a,b,col] of EDGES){
+    if(!P[a]||!P[b]) continue;
+    const vis = Math.min(DATA.visibility[i][a], DATA.visibility[i][b]);
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = alpha * (0.25 + 0.75*vis);
+    ctx.lineWidth = alpha===1 ? 4 : 2;
+    ctx.beginPath(); ctx.moveTo(P[a][0],P[a][1]); ctx.lineTo(P[b][0],P[b][1]); ctx.stroke();
+  }
+  if(alpha===1){
+    ctx.globalAlpha=1; ctx.fillStyle="#e6e9ef";
+    for(let j=11;j<P.length;j++){ if(!P[j]) continue;
+      ctx.beginPath(); ctx.arc(P[j][0],P[j][1],3,0,7); ctx.fill(); }
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawTrail(w,h,upto){
+  const sel=document.getElementById("trailsel").value;
+  if(sel==="") return;
+  ctx.strokeStyle="#ffffff"; ctx.lineWidth=1.5; ctx.globalAlpha=0.55;
+  ctx.beginPath(); let started=false;
+  for(let i=0;i<=upto;i++){
+    if(!frameOK(i)){ started=false; continue; }
+    const p = sel==="com" ? hipCentre(i) : F[i][+sel];
+    if(!p||p[0]===null){ started=false; continue; }
+    const q=project(p,w,h); if(!q){ started=false; continue; }
+    if(started) ctx.lineTo(q[0],q[1]); else { ctx.moveTo(q[0],q[1]); started=true; }
+  }
+  ctx.stroke(); ctx.globalAlpha=1;
+}
+
+// ---- 2D overlay on the video -------------------------------------------
+const vid = document.getElementById("vid");
+const ovl = document.getElementById("ovl"), octx = ovl.getContext("2d");
+const videoPane = document.getElementById("videoPane");
+let showOverlay = true, hasVideo = false;
+
+if (VIDSRC) {
+  hasVideo = true;
+  vid.src = VIDSRC;
+  videoPane.classList.add("on");
+  vid.addEventListener("loadedmetadata", () => {
+    // size the box to the video's aspect so the overlay lines up exactly
+    document.getElementById("vidbox").style.aspectRatio =
+      `${vid.videoWidth} / ${vid.videoHeight}`;
+  });
+  vid.addEventListener("error", () => {
+    videoPane.classList.remove("on");
+    document.getElementById("overlay").disabled = true;
+    console.warn("video failed to load:", VIDSRC);
+  });
+} else {
+  document.getElementById("overlay").style.display = "none";
+}
+
+function drawOverlay(i){
+  const dpr=window.devicePixelRatio||1;
+  const w=ovl.clientWidth, h=ovl.clientHeight;
+  if(!w||!h) return;
+  if(ovl.width!==w*dpr||ovl.height!==h*dpr){ ovl.width=w*dpr; ovl.height=h*dpr; }
+  octx.setTransform(dpr,0,0,dpr,0,0);
+  octx.clearRect(0,0,w,h);
+  if(!showOverlay || !SCREEN || !SCREEN[i]) return;
+
+  // landmarks are normalised to the source frame, and the <video> fills the
+  // box at its native aspect ratio, so a straight multiply is correct.
+  const P = SCREEN[i].map(p => (p && p[0]!==null) ? [p[0]*w, p[1]*h] : null);
+  octx.lineCap="round";
+  for(const [a,b,col] of EDGES){
+    if(!P[a]||!P[b]) continue;
+    const vis=Math.min(DATA.visibility[i][a],DATA.visibility[i][b]);
+    if(vis<0.3) continue;
+    octx.strokeStyle=col; octx.globalAlpha=0.35+0.65*vis;
+    octx.lineWidth=Math.max(2, w/220);
+    octx.beginPath(); octx.moveTo(P[a][0],P[a][1]); octx.lineTo(P[b][0],P[b][1]); octx.stroke();
+  }
+  octx.globalAlpha=1; octx.fillStyle="#fff";
+  const r=Math.max(2, w/380);
+  for(let j=11;j<P.length;j++){ if(!P[j]||DATA.visibility[i][j]<0.3) continue;
+    octx.beginPath(); octx.arc(P[j][0],P[j][1],r,0,7); octx.fill(); }
+}
+
+// ---- render loop --------------------------------------------------------
+let showGhosts=false, showGrid=true, cur=0;
+
+function render3D(){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth, h=cv.clientHeight;
+  if(cv.width!==w*dpr||cv.height!==h*dpr){ cv.width=w*dpr; cv.height=h*dpr; }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle="#0d0f13"; ctx.fillRect(0,0,w,h);
+
+  if(showGrid) drawGrid(w,h);
+  if(showGhosts) for(const d of [-8,-4,4,8]){
+    const i=cur+d; if(i>=0&&i<N&&frameOK(i)) drawSkeleton(i,w,h,0.16);
+  }
+  drawTrail(w,h,cur);
+  if(frameOK(cur)) drawSkeleton(cur,w,h,1);
+
+  document.getElementById("nodet").style.display = frameOK(cur)?"none":"block";
+  const hp=hipCentre(cur);
+  document.getElementById("hud").innerHTML =
+    `frame <b>${cur}</b> &nbsp; t=<b>${(cur/FPS).toFixed(2)}s</b>` +
+    (hp?`<br>hip height <b>${(hp[1]-FLOOR).toFixed(2)}</b> m`:"");
+}
+
+// ---- playback -----------------------------------------------------------
+// With a video loaded the <video> element is the clock and `cur` follows it;
+// otherwise we advance frames off requestAnimationFrame.
+const scrub=document.getElementById("scrub"), playBtn=document.getElementById("play");
+scrub.max=N-1;
+document.getElementById("fcount").textContent=`${N} frames · ${FPS.toFixed(1)} fps`;
+
+let playing=false, acc=0, last=0, seeking=false;
+
+function setFrame(i){
+  cur=Math.max(0,Math.min(N-1,i));
+  scrub.value=cur;
+  if(hasVideo && !playing){ seeking=true; vid.currentTime = cur/FPS; }
+}
+
+function loop(t){
+  if(playing){
+    if(hasVideo && vid.readyState>=2){
+      cur = Math.max(0, Math.min(N-1, Math.round(vid.currentTime*FPS)));
+      scrub.value=cur;
+    } else {
+      if(!last) last=t;
+      acc += (t-last)/1000 * FPS * parseFloat(document.getElementById("speed").value);
+      last=t;
+      while(acc>=1){ cur=(cur+1)%N; acc-=1; scrub.value=cur; }
+    }
+  } else last=0;
+  render3D();
+  drawOverlay(cur);
+  requestAnimationFrame(loop);
+}
+
+function setPlaying(v){
+  playing=v; last=0;
+  playBtn.textContent = v?"❚❚ pause":"▶ play";
+  playBtn.classList.toggle("on",v);
+  if(hasVideo){
+    if(v){ if(vid.ended || cur>=N-1) vid.currentTime=0; vid.play().catch(()=>{}); }
+    else vid.pause();
+  }
+}
+if(hasVideo) vid.addEventListener("ended", ()=>setPlaying(false));
+
+playBtn.onclick=()=>setPlaying(!playing);
+scrub.oninput=()=>setFrame(+scrub.value);
+document.getElementById("speed").onchange=e=>{ if(hasVideo) vid.playbackRate=parseFloat(e.target.value); };
+document.getElementById("ghost").onclick=e=>{ showGhosts=!showGhosts; e.target.classList.toggle("on",showGhosts); };
+document.getElementById("grid").onclick=e=>{ showGrid=!showGrid; e.target.classList.toggle("on",showGrid); };
+document.getElementById("overlay").onclick=e=>{ showOverlay=!showOverlay; e.target.classList.toggle("on",showOverlay); };
+document.getElementById("reset").onclick=()=>{ cam={...HOME}; };
+addEventListener("keydown",e=>{
+  if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return;
+  if(e.code==="Space"){ e.preventDefault(); setPlaying(!playing); }
+  if(e.code==="ArrowRight"){ setPlaying(false); setFrame(cur+1); }
+  if(e.code==="ArrowLeft"){ setPlaying(false); setFrame(cur-1); }
+});
+
+// ---- mouse --------------------------------------------------------------
+let drag=null;
+cv.addEventListener("pointerdown",e=>{ drag={x:e.clientX,y:e.clientY,shift:e.shiftKey}; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove",e=>{
+  if(!drag) return;
+  const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+  if(drag.shift){ cam.panx+=dx*0.004*cam.dist; cam.pany-=dy*0.004*cam.dist; }
+  else { cam.yaw+=dx*0.008; cam.pitch=Math.max(-1.4,Math.min(1.4,cam.pitch+dy*0.008)); }
+  drag.x=e.clientX; drag.y=e.clientY;
+});
+cv.addEventListener("pointerup",()=>drag=null);
+cv.addEventListener("wheel",e=>{ e.preventDefault();
+  cam.dist=Math.max(0.6,Math.min(12,cam.dist*Math.exp(e.deltaY*0.001))); },{passive:false});
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

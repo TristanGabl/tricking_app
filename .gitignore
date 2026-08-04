@@ -1,0 +1,11 @@
+.venv/
+out/
+examples/out/
+__pycache__/
+*.pyc
+
+# large / personal — see README for how to fetch the model
+models/
+*.mov
+*.MOV
+.DS_Store
