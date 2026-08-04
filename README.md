@@ -64,10 +64,16 @@ Re-render the viewer without re-running inference:
 
 **fixed — real camera** (default). The camera does not move: it stands exactly
 where your phone stood, using the recovered pose and the assumed FOV, and the
-athlete travels through the scene in front of it. There is a real ground plane
-fitted to the footage (tilted, since the camera rarely is level), its horizon,
-a sky, a key light with a visible sun, and a shadow cast onto the ground along
-the light direction. Orbit and zoom are disabled here by design.
+athlete travels through the scene in front of it. There is a ground plane, its
+horizon, a sky, a key light with a visible sun, and a shadow cast onto the
+ground along the light direction. Orbit and zoom are disabled here by design.
+
+Nothing assumes where the camera was — hip height, head height, propped on a
+bag or sitting in the grass all work. The ground plane is fitted only to the
+lowest foot point of each frame (grounded frames land on it, airborne frames
+sit above, feet never go below), and the camera's height above the ground falls
+out of that fit. On the test clip it came out 0.13 m up and tilted 17°, i.e. a
+phone lying near the grass, which is what that footage is.
 
 **follow — orbit.** The old rig: hip-centred, so the athlete rotates in place,
 and you can drag to orbit, shift-drag to pan, scroll to zoom. Use it to inspect
@@ -77,11 +83,16 @@ The skeleton is drawn with volume (capsule limbs, sphere joints, a filled torso)
 under a key light plus fill, painted far-to-near. "solid" toggles back to flat
 wireframe; "scene" toggles the floor and sky.
 
+**Light and dark** are both supported and the default follows your OS setting.
+The theme button overrides it for that session; if you never touch it, the page
+keeps following the system live.
+
 ## Viewer controls
 
 Globally:
 space = play/pause · ←/→ = step one frame. Trail dropdown draws the flight path
-of a joint (default hip centre — good for reading the arc of a kick or twist).
+of a joint (off by default; hip centre is good for reading the arc of a kick or
+twist, but only the last ~45 frames are drawn — see the depth caveat below).
 "ghosts" overlays ±4/±8 frames so you can see rotation direction; "2D overlay"
 toggles the skeleton off the video so you can watch the raw footage.
 

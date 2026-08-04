@@ -164,53 +164,80 @@ def place_in_scene(world, screen, width, height, fov_deg=65.0, smooth=5, scale=1
     return scene, intr
 
 
-def fit_floor(scene):
-    """Find the ground plane under the athlete.
+def fit_floor(scene, rng=None):
+    """Fit the ground plane to the lowest foot points across the clip.
 
-    Fitting a plane to foot positions sounds right but fails: foot *depth* is
-    the noisiest quantity we have, so the fit tilts to chase that noise. The
-    athlete's own long axis is much better constrained -- it comes from the PnP
-    rotation, which the image pins down well -- so take "up" from the torso on
-    frames where they are clearly upright, then drop the plane onto the lowest
-    foot point.
+    Nothing here assumes where the camera was -- it can be at hip height, head
+    height or sitting on the grass; the plane comes only from where the feet
+    actually went, and the camera's height above it falls out of the fit.
+
+    Each frame contributes its single lowest foot point. Grounded frames put
+    that point on the ground; airborne frames put it above, never below. RANSAC
+    over those candidates, scoring inliers and penalising anything that ends up
+    underneath the plane, picks out the ground.
 
     Returns (n, d) with |n| = 1, n pointing up, and n.p + d = 0 on the plane.
     """
-    ups, spans = [], []
-    for f in scene:
-        if not np.isfinite(f).all():
-            continue
-        ankle = (f[27] + f[28]) / 2.0
-        shoulder = (f[11] + f[12]) / 2.0
-        v = shoulder - ankle
+    ok = scene[np.isfinite(scene).all((1, 2))]
+    if len(ok) < 8:
+        return np.array([0.0, 1.0, 0.0]), 1.4
+
+    # A provisional "down" so we can tell which foot point is the lowest. It
+    # comes from the athlete's own torso, not from any guess about the camera.
+    ups = []
+    for f in ok:
+        v = (f[11] + f[12]) / 2.0 - (f[27] + f[28]) / 2.0
         L = np.linalg.norm(v)
         if L > 1e-6:
             ups.append(v / L)
-            spans.append(L)
+    up = np.mean(ups, 0) if ups else np.array([0.0, 1.0, 0.0])
+    up /= np.linalg.norm(up)
+    if up[1] < 0:
+        up = -up
 
-    if len(ups) < 5:
-        return np.array([0.0, 1.0, 0.0]), -float(np.nanmin(scene[:, :, 1]))
+    feet = ok[:, [29, 30, 31, 32], :]                     # heels and toes
+    lowest = feet[np.arange(len(ok)), (feet @ up).argmin(1)]
 
-    ups, spans = np.asarray(ups), np.asarray(spans)
-    # Upright frames are the ones where ankle->shoulder is near its longest;
-    # crouched or inverted frames say nothing useful about which way is up.
-    tall = spans >= np.percentile(spans, 70)
-    n = ups[tall].mean(0)
-    n /= np.linalg.norm(n)
-    if n[1] < 0:
-        n = -n
+    rng = rng or np.random.default_rng(0)
+    best, best_score = None, -np.inf
+    for _ in range(2000):
+        p0, p1, p2 = lowest[rng.choice(len(lowest), 3, replace=False)]
+        n = np.cross(p1 - p0, p2 - p0)
+        ln = np.linalg.norm(n)
+        if ln < 1e-6:
+            continue
+        n /= ln
+        if n @ up < 0:
+            n = -n
+        if n @ up < 0.80:              # the ground is not steeply raked
+            continue
+        d = -n.dot(p0)
+        h = lowest @ n + d
+        score = np.sum(np.abs(h) < 0.08) - 3.0 * np.sum(h < -0.08)
+        if score > best_score:
+            best_score, best = score, (n, d)
 
-    # Anchor the plane on the upright frames only. Monocular depth wanders by
-    # the better part of a metre across a clip, so a global min would latch onto
-    # the single worst-placed frame; standing frames are the trustworthy ones.
-    good = scene[np.isfinite(scene).all((1, 2))]
-    foot_h = (good @ n)[:, [29, 30, 31, 32]].min(1)
-    d = -float(np.median(foot_h[tall])) if tall.sum() else -float(np.median(foot_h))
+    if best is None:
+        n, d = up, -float(np.min(lowest @ up))
+    else:
+        n, d = best
+        for _ in range(3):             # refit on inliers, a couple of rounds
+            inl = lowest[np.abs(lowest @ n + d) < 0.10]
+            if len(inl) < 3:
+                break
+            c = inl.mean(0)
+            _, _, vt = np.linalg.svd(inl - c)
+            n2 = vt[-1]
+            if n2 @ up < 0:
+                n2 = -n2
+            if n2 @ up < 0.80:
+                break
+            n, d = n2, -n2.dot(c)
 
-    tilt = np.rad2deg(np.arccos(np.clip(n[1], -1, 1)))
-    print(f"ground plane from {int(tall.sum())} upright frames, "
-          f"{tilt:.1f}deg off the image vertical, camera {d:.2f} m above it")
-    return n, d
+    on = int((np.abs(lowest @ n + d) < 0.10).sum())
+    print(f"ground plane from {on}/{len(lowest)} grounded frames; "
+          f"camera sits {d:.2f} m above it")
+    return n, float(d)
 
 
 def extract(video_path, out_prefix, variant=DEFAULT_VARIANT, fov=65.0, smooth=5,
