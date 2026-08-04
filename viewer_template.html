@@ -125,7 +125,7 @@
       <button id="ghost">ghosts</button>
       <button id="grid" class="on">scene</button>
       <button id="overlay" class="on">2D overlay</button>
-      <button id="reset">reset view</button>
+      <button id="reset" title="back to the real camera's viewpoint">reset view</button>
       <button id="theme" title="light / dark — follows your system by default">theme</button>
     </div>
   </footer>
@@ -184,6 +184,42 @@ let cam = {...HOME};
 // "follow" is the orbitable rig that keeps the athlete centred.
 let mode = canFixed ? "fixed" : "follow";
 
+/* The real camera is where this view STARTS, not where it is stuck. The scene
+   rotates about a fixed pivot -- the middle of the hip's x/y/z range over the
+   whole clip -- and zoom magnifies about that same pivot, so at yaw=pitch=0,
+   zoom=1 the projection is bit-for-bit the real camera's framing. */
+let PIVOT = [0,0,3];
+let view = { yaw:0, pitch:0, zoom:1 };
+const VIEW_HOME = { yaw:0, pitch:0, zoom:1 };
+
+if (canFixed){
+  let lo=[ Infinity, Infinity, Infinity], hi=[-Infinity,-Infinity,-Infinity];
+  for (const f of SCENE){
+    if(!f || !f[23] || f[23][0]===null) continue;
+    for(let k=0;k<3;k++){
+      const c=(f[23][k]+f[24][k])/2;
+      lo[k]=Math.min(lo[k],c); hi[k]=Math.max(hi[k],c);
+    }
+  }
+  if (isFinite(lo[0])) PIVOT = [0,1,2].map(k=>(lo[k]+hi[k])/2);
+}
+
+// Rotate a vector by the current view (yaw about Y, then pitch).
+function rotView(v){
+  const cy=Math.cos(view.yaw), sy=Math.sin(view.yaw);
+  const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
+  const x = v[0]*cy - v[2]*sy;
+  let z   = v[0]*sy + v[2]*cy;
+  const y = v[1]*cp - z*sp;
+  z       = v[1]*sp + z*cp;
+  return [x,y,z];
+}
+// World point -> camera space, after orbiting about the pivot.
+function viewPoint(p){
+  const r = rotView([p[0]-PIVOT[0], p[1]-PIVOT[1], p[2]-PIVOT[2]]);
+  return [r[0]+PIVOT[0], r[1]+PIVOT[1], r[2]+PIVOT[2]];
+}
+
 // Maps the real camera's image plane onto the canvas, letterboxed, so the
 // fixed view frames the scene exactly as the video does.
 let FIT = {s:1, ox:0, oy:0};
@@ -193,13 +229,21 @@ function fitCanvas(w,h){
   return FIT;
 }
 // Pinhole projection with the recovered intrinsics: camera at the origin
-// looking down +z, y up. No orbit, no pan -- this IS the real camera.
-function projectFixed(p, w, h){
-  const z = p[2];
+// looking down +z, y up.
+function pinhole(q, w, h){
+  const z = q[2];
   if (z <= 0.05) return null;
-  const u = INTR.cx + INTR.fx * p[0] / z;
-  const v = INTR.cy - INTR.fy * p[1] / z;
-  return [FIT.ox + u*FIT.s, FIT.oy + v*FIT.s, z];
+  return [INTR.cx + INTR.fx*q[0]/z, INTR.cy - INTR.fy*q[1]/z, z];
+}
+function projectFixed(p, w, h){
+  const q = viewPoint(p);
+  const im = pinhole(q, w, h);
+  if (!im) return null;
+  // magnify about the pivot's image position so zoom never walks off the athlete
+  const pc = pinhole(PIVOT, w, h);
+  let u = im[0], v = im[1];
+  if (pc){ u = pc[0] + (u-pc[0])*view.zoom; v = pc[1] + (v-pc[1])*view.zoom; }
+  return [FIT.ox + u*FIT.s, FIT.oy + v*FIT.s, im[2]];
 }
 // The fitted ground plane: n.p + d = 0, n pointing up. The camera is rarely
 // level, so this is genuinely tilted and everything on the ground follows it.
@@ -300,7 +344,7 @@ for (const [a,b,,key] of EDGES.map(e=>[e[0],e[1],e[2],e[0]+"-"+e[1]])) {
 // Rotate a world point into camera space (same transform as project(), minus
 // the perspective divide) so we can do lighting and depth sorting there.
 function toCam(p){
-  if (mode === "fixed") return [p[0], p[1], p[2]];   // already camera space
+  if (mode === "fixed") return viewPoint(p);         // camera space after orbiting
   const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
   const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
   const x = p[0]*cy - p[2]*sy;
@@ -407,9 +451,16 @@ function groundShadow(f, w, h){
 /* The horizon is the plane's vanishing line: directions with n.dir = 0. In
    image terms that is a straight line, slanted whenever the camera is rolled. */
 function horizonAt(px){
-  const u = (px - FIT.ox)/FIT.s;
-  if (Math.abs(FN[1]) < 1e-4) return null;
-  const v = INTR.cy + INTR.fy * ( FN[0]*(u-INTR.cx)/INTR.fx + FN[2] ) / FN[1];
+  const n = rotView(FN);                       // plane normal follows the orbit
+  const dot = FN[0]*PIVOT[0]+FN[1]*PIVOT[1]+FN[2]*PIVOT[2];
+  const dn  = n[0]*PIVOT[0]+n[1]*PIVOT[1]+n[2]*PIVOT[2];
+  const d   = FD + dot - dn;
+  if (Math.abs(n[1]) < 1e-4) return null;
+  const pc = pinhole(PIVOT, 0, 0);
+  let u = (px - FIT.ox)/FIT.s;
+  if (pc) u = pc[0] + (u - pc[0])/view.zoom;   // undo the zoom to ask the pinhole
+  let v = INTR.cy + INTR.fy * ( n[0]*(u-INTR.cx)/INTR.fx + n[2] ) / n[1];
+  if (pc) v = pc[1] + (v - pc[1])*view.zoom;
   return FIT.oy + v*FIT.s;
 }
 function horizonY(){ const h=horizonAt(FIT.ox + INTR.cx*FIT.s); return h===null?-1e5:h; }
@@ -472,12 +523,22 @@ function drawFloor(w,h){
 }
 
 /* Real cast shadow: slide each joint along the light direction until it hits
-   the floor plane. Reads far better than a blob directly underneath. */
+   the floor plane. Drawn into an offscreen buffer at full opacity and then
+   composited once, so overlapping limbs never stack into darker patches --
+   a shadow is one tint no matter how much of the body is above it. */
+const shadowBuf = document.createElement("canvas");
+const sctx = shadowBuf.getContext("2d");
+
 function castShadow(f,w,h){
   const L=[-LIGHT[0],-LIGHT[1],-LIGHT[2]];   // LIGHT points at the light; rays go the other way
   const nl = FN[0]*L[0]+FN[1]*L[1]+FN[2]*L[2];
   if(nl > -0.05) return;                     // light not above the plane
-  ctx.save(); ctx.globalCompositeOperation="multiply";
+  const dpr=window.devicePixelRatio||1;
+  if(shadowBuf.width!==w*dpr||shadowBuf.height!==h*dpr){
+    shadowBuf.width=w*dpr; shadowBuf.height=h*dpr;
+  }
+  sctx.setTransform(dpr,0,0,dpr,0,0);
+  sctx.clearRect(0,0,w,h);
   const put=[];
   for(let j=0;j<33;j++){
     const p=f[j];
@@ -485,16 +546,21 @@ function castShadow(f,w,h){
     const t=-heightAbove(p)/nl;              // slide along the ray onto the plane
     put.push([p[0]+L[0]*t, p[1]+L[1]*t, p[2]+L[2]*t]);
   }
+  sctx.strokeStyle="#000"; sctx.lineCap="round";
   for(const [a,b] of EDGES){
     if(!put[a]||!put[b]) continue;
     const A=projectFixed(put[a],w,h), B=projectFixed(put[b],w,h);
     if(!A||!B) continue;
-    const drop=Math.max(0.05, (heightAbove(f[a])+heightAbove(f[b]))/2);
-    ctx.strokeStyle=`rgba(0,0,0,${TH.shadow/(1+drop*1.6)})`;
-    ctx.lineWidth=Math.max(2, 26/A[2]);
-    ctx.lineCap="round";
-    ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke();
+    sctx.lineWidth=Math.max(2, 26/A[2]);
+    sctx.beginPath(); sctx.moveTo(A[0],A[1]); sctx.lineTo(B[0],B[1]); sctx.stroke();
   }
+  // one composite, one tint -- height off the ground only softens the whole thing
+  const hip=hipCentre(cur);
+  const drop=hip ? Math.max(0, heightAbove(hip)) : 0;
+  ctx.save();
+  ctx.globalCompositeOperation="multiply";
+  ctx.globalAlpha=TH.shadow/(1+drop*0.9);
+  ctx.drawImage(shadowBuf, 0, 0, w, h);
   ctx.restore();
 }
 
@@ -533,15 +599,17 @@ function drawSkeleton(i,w,h,alpha){
     if(vis<0.15) continue;
     const depth=(toCam(f[a])[2]+toCam(f[b])[2])/2;
     const rgb=hex2rgb(col), r=BONE_R[a+"-"+b]||0.04;
-    prims.push({depth, draw:()=>capsule(f[a],f[b],r,rgb,alpha*(0.4+0.6*vis),w,h)});
+    const dim=rgb.map(c=>c*(0.55+0.45*vis));      // uncertain limbs darken, not fade
+    prims.push({depth, draw:()=>capsule(f[a],f[b],r,dim,alpha,w,h)});
   }
   for(let j=0;j<33;j++){
     if(!f[j]||f[j][0]===null||!JOINT_R[j]) continue;
     if(DATA.visibility[i][j]<0.15) continue;
     const grp=EDGES.find(e=>e[0]===j||e[1]===j);
+    const jv=DATA.visibility[i][j];
+    const jrgb=hex2rgb(grp?grp[2]:"#c8cdd6").map(c=>c*(0.55+0.45*jv));
     prims.push({depth:toCam(f[j])[2],
-                draw:()=>sphere(f[j], JOINT_R[j], hex2rgb(grp?grp[2]:"#c8cdd6"),
-                                alpha*(0.4+0.6*DATA.visibility[i][j]), w, h)});
+                draw:()=>sphere(f[j], JOINT_R[j], jrgb, alpha, w, h)});
   }
   const tC=[11,12,23,24].every(j=>f[j]&&f[j][0]!==null)
     ? [11,12,23,24].reduce((s,j)=>s+toCam(f[j])[2],0)/4 : null;
@@ -712,16 +780,19 @@ if(!canFixed){
 }
 function applyMode(){
   mode = modeSel.value;
+  cv.style.cursor = "grab";
   document.getElementById("panetag").textContent =
     mode==="fixed" ? "3D scene — fixed camera" : "3D pose — follow camera";
-  document.getElementById("reset").disabled = (mode==="fixed");
-  cv.style.cursor = (mode==="fixed") ? "default" : "grab";
+  document.getElementById("reset").disabled = false;
   document.getElementById("camhint").textContent = (mode==="fixed")
-    ? "camera locked at the real camera's position"
+    ? "starts at the real camera · drag to orbit the scene · scroll to zoom"
     : "drag to orbit · scroll to zoom · shift-drag to pan";
 }
 modeSel.onchange=applyMode;
-document.getElementById("reset").onclick=()=>{ cam={...HOME}; };
+document.getElementById("reset").onclick=()=>{
+  if(mode==="fixed") view={...VIEW_HOME};       // back to the real camera
+  else cam={...HOME};
+};
 addEventListener("keydown",e=>{
   if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return;
   if(e.code==="Space"){ e.preventDefault(); setPlaying(!playing); }
@@ -732,18 +803,27 @@ addEventListener("keydown",e=>{
 // ---- mouse --------------------------------------------------------------
 let drag=null;
 cv.addEventListener("pointerdown",e=>{
-  if(mode==="fixed") return;
   drag={x:e.clientX,y:e.clientY,shift:e.shiftKey}; cv.setPointerCapture(e.pointerId); });
 cv.addEventListener("pointermove",e=>{
   if(!drag) return;
   const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
-  if(drag.shift){ cam.panx+=dx*0.004*cam.dist; cam.pany-=dy*0.004*cam.dist; }
-  else { cam.yaw+=dx*0.008; cam.pitch=Math.max(-1.4,Math.min(1.4,cam.pitch+dy*0.008)); }
+  if(mode==="fixed"){
+    view.yaw += dx*0.008;
+    view.pitch = Math.max(-1.2, Math.min(1.2, view.pitch + dy*0.008));
+  } else if(drag.shift){
+    cam.panx+=dx*0.004*cam.dist; cam.pany-=dy*0.004*cam.dist;
+  } else {
+    cam.yaw+=dx*0.008; cam.pitch=Math.max(-1.4,Math.min(1.4,cam.pitch+dy*0.008));
+  }
   drag.x=e.clientX; drag.y=e.clientY;
 });
 cv.addEventListener("pointerup",()=>drag=null);
-cv.addEventListener("wheel",e=>{ if(mode==="fixed") return; e.preventDefault();
-  cam.dist=Math.max(0.6,Math.min(12,cam.dist*Math.exp(e.deltaY*0.001))); },{passive:false});
+cv.addEventListener("wheel",e=>{ e.preventDefault();
+  if(mode==="fixed"){
+    view.zoom = Math.max(0.25, Math.min(8, view.zoom*Math.exp(-e.deltaY*0.001)));
+  } else {
+    cam.dist=Math.max(0.6,Math.min(12,cam.dist*Math.exp(e.deltaY*0.001)));
+  }},{passive:false});
 
 // ---- theme --------------------------------------------------------------
 // System preference decides the default; the button overrides it, and if the

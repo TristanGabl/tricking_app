@@ -62,11 +62,14 @@ Re-render the viewer without re-running inference:
 
 ## Camera modes
 
-**fixed — real camera** (default). The camera does not move: it stands exactly
-where your phone stood, using the recovered pose and the assumed FOV, and the
-athlete travels through the scene in front of it. There is a ground plane, its
-horizon, a sky, a key light with a visible sun, and a shadow cast onto the
-ground along the light direction. Orbit and zoom are disabled here by design.
+**fixed — real camera** (default). The view *starts* exactly where your phone
+stood, using the recovered pose and the assumed FOV, and the athlete travels
+through the scene in front of it. From there you can drag to orbit and scroll
+to zoom — the scene rotates about a fixed pivot, the middle of the hip's x/y/z
+range over the whole clip, and zoom magnifies about that same pivot so the
+athlete never walks out of frame. "reset view" snaps back to the real camera.
+There is a ground plane, its horizon, a sky, a key light with a visible sun,
+and a shadow cast onto the ground along the light direction.
 
 Nothing assumes where the camera was — hip height, head height, propped on a
 bag or sitting in the grass all work. The ground plane is fitted only to the
@@ -80,7 +83,10 @@ and you can drag to orbit, shift-drag to pan, scroll to zoom. Use it to inspect
 a pose from angles the real camera never had. "reset view" re-centres it.
 
 The skeleton is drawn with volume (capsule limbs, sphere joints, a filled torso)
-under a key light plus fill, painted far-to-near. "solid" toggles back to flat
+under a key light plus fill, painted far-to-near. Limbs are fully opaque —
+tracking confidence darkens a limb rather than making it see-through — and the
+shadow is composited in one pass so it stays a single tint however many body
+parts are stacked above it. "solid" toggles back to flat
 wireframe; "scene" toggles the floor and sky.
 
 **Light and dark** are both supported and the default follows your OS setting.
